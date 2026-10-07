@@ -3,3 +3,9 @@ uvicorn[standard]
 python-dotenv
 pydantic-settings
 GitPython
+SQLAlchemy
+psycopg[binary]
+tree-sitter
+tree-sitter-language-pack
+qdrant-client
+sentence-transformers
