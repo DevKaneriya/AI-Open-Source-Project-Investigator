@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -14,7 +16,22 @@ class VectorService:
     VECTOR_SIZE = 384
 
     def __init__(self):
-        self.client = QdrantClient(":memory:")
+        qdrant_path = (
+            Path(__file__).resolve()
+            .parents[3]
+            / "data"
+            / "qdrant"
+        )
+
+        qdrant_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.client = QdrantClient(
+            path=str(qdrant_path)
+        )
+
         self._ensure_collection()
 
     def _ensure_collection(self):
@@ -59,7 +76,7 @@ class VectorService:
                 FieldCondition(
                     key="repository_id",
                     match=MatchValue(
-                        value=repository_id
+                        value=repository_id,
                     ),
                 )
             ]

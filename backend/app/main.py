@@ -23,6 +23,9 @@ from backend.app.services.vector_service import VectorService
 from backend.app.services.vector_indexing_service import VectorIndexingService
 from backend.app.services.code_chunk_service import CodeChunkService
 from backend.app.services.semantic_search_service import SemanticSearchService
+from backend.app.services.retrieval_service import (
+    RetrievalService,
+)
 
 from backend.app.models.repository import Repository
 from backend.app.models.repository_file import RepositoryFile
@@ -49,20 +52,22 @@ code_retrieval_service = CodeRetrievalService()
 repository_search_service = RepositorySearchService()
 code_relationship_service = CodeRelationshipService()
 repository_investigation_service = RepositoryInvestigationService()
-embedding_service = EmbeddingService()
+code_chunk_service = CodeChunkService()
 
+embedding_service = EmbeddingService()
 vector_service = VectorService()
 
 vector_indexing_service = VectorIndexingService(
     embedding_service=embedding_service,
     vector_service=vector_service,
 )
-
 semantic_search_service = SemanticSearchService(
     embedding_service=embedding_service,
     vector_service=vector_service,
 )
-code_chunk_service = CodeChunkService()
+retrieval_service = RetrievalService(
+    semantic_search_service=semantic_search_service,
+)
 
 
 class RepositoryRequest(BaseModel):
@@ -367,3 +372,41 @@ def semantic_search(
         "results": results,
         "count": len(results),
     }
+    
+    
+@app.get(
+    "/repositories/{repository_id}/retrieve"
+)
+def retrieve_repository(
+    repository_id: int,
+    query: str,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+):
+    if not query.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Retrieval query cannot be empty.",
+        )
+
+    if limit < 1 or limit > 50:
+        raise HTTPException(
+            status_code=400,
+            detail="Limit must be between 1 and 50.",
+        )
+
+    try:
+        result = retrieval_service.retrieve(
+            db=db,
+            repository_id=repository_id,
+            query=query,
+            semantic_limit=limit,
+        )
+
+        return result
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
