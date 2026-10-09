@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 from qdrant_client import QdrantClient
@@ -5,6 +6,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     MatchValue,
     PointStruct,
     VectorParams,
@@ -17,21 +19,14 @@ class VectorService:
 
     def __init__(self):
         qdrant_path = (
-            Path(__file__).resolve()
-            .parents[3]
+            Path(__file__).resolve().parents[3]
             / "data"
             / "qdrant"
         )
 
-        qdrant_path.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        qdrant_path.mkdir(parents=True, exist_ok=True)
 
-        self.client = QdrantClient(
-            path=str(qdrant_path)
-        )
-
+        self.client = QdrantClient(path=str(qdrant_path))
         self._ensure_collection()
 
     def _ensure_collection(self):
@@ -53,16 +48,30 @@ class VectorService:
             ),
         )
 
-    def upsert(
-        self,
-        points: list[PointStruct],
-    ):
+    def upsert(self, points: list[PointStruct]):
         if not points:
             return
 
         self.client.upsert(
             collection_name=self.COLLECTION_NAME,
             points=points,
+        )
+
+    def delete_repository(self, repository_id: int):
+        repository_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="repository_id",
+                    match=MatchValue(value=repository_id),
+                )
+            ]
+        )
+
+        self.client.delete(
+            collection_name=self.COLLECTION_NAME,
+            points_selector=FilterSelector(
+                filter=repository_filter,
+            ),
         )
 
     def search(
@@ -75,9 +84,7 @@ class VectorService:
             must=[
                 FieldCondition(
                     key="repository_id",
-                    match=MatchValue(
-                        value=repository_id,
-                    ),
+                    match=MatchValue(value=repository_id),
                 )
             ]
         )

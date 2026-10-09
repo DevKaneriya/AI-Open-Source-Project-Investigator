@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from backend.app.models.code_chunk import CodeChunk
 from backend.app.models.code_symbol import CodeSymbol
 from backend.app.models.repository_file import RepositoryFile
+from backend.app.services.file_filter_service import should_include_file
 
 
 class CodeChunkService:
@@ -50,6 +51,9 @@ class CodeChunkService:
             )
 
             if not file_path.is_file():
+                continue
+            
+            if not should_include_file(repository_path, file_path):
                 continue
 
             symbols = self._get_file_symbols(

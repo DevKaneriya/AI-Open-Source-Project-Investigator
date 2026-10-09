@@ -9,3 +9,4 @@ tree-sitter
 tree-sitter-language-pack
 qdrant-client
 sentence-transformers
+groq

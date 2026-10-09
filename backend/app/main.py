@@ -23,9 +23,9 @@ from backend.app.services.vector_service import VectorService
 from backend.app.services.vector_indexing_service import VectorIndexingService
 from backend.app.services.code_chunk_service import CodeChunkService
 from backend.app.services.semantic_search_service import SemanticSearchService
-from backend.app.services.retrieval_service import (
-    RetrievalService,
-)
+from backend.app.services.retrieval_service import RetrievalService
+from backend.app.services.llm_service import LLMService
+from backend.app.services.query_analyzer_service import QueryAnalyzerService
 
 from backend.app.models.repository import Repository
 from backend.app.models.repository_file import RepositoryFile
@@ -55,18 +55,28 @@ repository_investigation_service = RepositoryInvestigationService()
 code_chunk_service = CodeChunkService()
 
 embedding_service = EmbeddingService()
+
 vector_service = VectorService()
 
 vector_indexing_service = VectorIndexingService(
     embedding_service=embedding_service,
     vector_service=vector_service,
 )
+
 semantic_search_service = SemanticSearchService(
     embedding_service=embedding_service,
     vector_service=vector_service,
 )
+
+llm_service = LLMService()
+
+query_analyzer_service = QueryAnalyzerService(
+    llm_service=llm_service,
+)
+
 retrieval_service = RetrievalService(
     semantic_search_service=semantic_search_service,
+    query_analyzer_service=query_analyzer_service,
 )
 
 
@@ -409,4 +419,31 @@ def retrieve_repository(
         raise HTTPException(
             status_code=404,
             detail=str(exc),
+        )
+        
+        
+        
+@app.get("/query-analyze")
+def analyze_query(query: str):
+    if not query.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Query cannot be empty."
+        )
+
+    try:
+        result = query_analyzer_service.analyze(query)
+
+        return result.model_dump()
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc)
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
         )

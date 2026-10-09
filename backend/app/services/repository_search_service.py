@@ -1,4 +1,5 @@
 from pathlib import Path
+from backend.app.services.file_filter_service import should_include_file
 
 
 class RepositorySearchService:
@@ -23,6 +24,9 @@ class RepositorySearchService:
 
         for file_path in root.rglob("*"):
             if not file_path.is_file():
+                continue
+            
+            if not should_include_file(repository_path, file_path):
                 continue
 
             if any(

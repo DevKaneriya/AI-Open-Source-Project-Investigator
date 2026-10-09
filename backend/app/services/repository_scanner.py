@@ -1,6 +1,6 @@
 from pathlib import Path
 from collections import Counter
-
+from backend.app.services.file_filter_service import should_include_file
 
 class RepositoryScanner:
 
@@ -11,11 +11,14 @@ class RepositoryScanner:
 
         root = Path(repository_path)
 
+        
         files = [
             path
             for path in root.rglob("*")
             if path.is_file()
+            and should_include_file(root, path)
         ]
+
 
         directories = [
             path

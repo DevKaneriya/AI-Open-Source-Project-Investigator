@@ -13,6 +13,9 @@ class Settings(BaseSettings):
 
     vector_db_url: str | None = None
     vector_db_api_key: str | None = None
+    
+    groq_api_key: str | None = None
+    query_analyzer_model: str = "qwen/qwen3.8-27b"
 
     model_config = SettingsConfigDict(
         env_file=".env",

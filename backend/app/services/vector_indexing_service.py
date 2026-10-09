@@ -48,6 +48,8 @@ class VectorIndexingService:
         print(f"\n[1] PostgreSQL chunk loading")
         print(f"    Chunks found: {len(chunks)}")
         print(f"    Time: {step_time:.3f} seconds")
+        
+        self.vector_service.delete_repository(repository_id)
 
         if not chunks:
             print("\nNo chunks found.")

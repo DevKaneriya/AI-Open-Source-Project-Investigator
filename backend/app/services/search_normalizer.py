@@ -1,28 +1,25 @@
+
 import re
 
 
 class SearchNormalizer:
     @staticmethod
     def normalize(value: str) -> str:
-        value = value.strip().lower()
+        value = value.strip()
 
+        # Split camelCase and PascalCase before lowercasing.
         value = re.sub(
             r"([a-z0-9])([A-Z])",
             r"\1 \2",
             value,
         )
 
-        value = re.sub(
-            r"[_\-]+",
-            " ",
-            value,
-        )
+        # Treat underscores and hyphens as word separators.
+        value = re.sub(r"[_\-]+", " ", value)
 
-        value = re.sub(
-            r"\s+",
-            " ",
-            value,
-        )
+        # Normalize case and whitespace.
+        value = value.lower()
+        value = re.sub(r"\s+", " ", value)
 
         return value.strip()
 
