@@ -420,6 +420,35 @@ def retrieve_repository(
             status_code=404,
             detail=str(exc),
         )
+    
+    except RuntimeError as exc:
+        # LLM service configuration errors
+        error_msg = str(exc)
+        if "GROQ_API_KEY" in error_msg or "not configured" in error_msg:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Configuration error: {error_msg}",
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Service error: {error_msg}",
+        )
+    
+    except OSError as exc:
+        # File system errors
+        raise HTTPException(
+            status_code=500,
+            detail=f"File system error: {str(exc)}",
+        )
+    
+    except Exception as exc:
+        # Catch all other errors to prevent unhandled 500s
+        import logging
+        logging.error(f"Unexpected error in retrieve endpoint: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred during retrieval: {str(exc)}",
+        )
         
         
         

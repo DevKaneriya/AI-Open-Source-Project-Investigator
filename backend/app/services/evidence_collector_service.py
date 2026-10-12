@@ -1,5 +1,6 @@
 import re
 from collections import defaultdict
+from backend.app.models.query_analysis import QuestionType
 
 
 class EvidenceCollectorService:
@@ -15,6 +16,16 @@ class EvidenceCollectorService:
     """
 
     DEFAULT_MAX_EVIDENCE = 12
+    
+    # Architectural file type bonuses
+    ARCHITECTURAL_FILE_BONUSES = {
+        "readme": 0.30,
+        "entry_point": 0.25,
+        "routes": 0.20,
+        "models": 0.15,
+        "configuration": 0.15,
+        "dependency": 0.10,
+    }
 
     TYPE_BASE_SCORES = {
         "source_context": 1.00,
@@ -37,84 +48,122 @@ class EvidenceCollectorService:
         self,
         retrieval_results: dict,
         max_evidence: int = DEFAULT_MAX_EVIDENCE,
+        question_type: QuestionType | None = None,
     ) -> dict:
-        results = retrieval_results.get("results", {})
-        query = retrieval_results.get("query", "")
-        query_analysis = retrieval_results.get("query_analysis", {})
+        try:
+            results = retrieval_results.get("results", {})
+            query = retrieval_results.get("query", "")
+            query_analysis = retrieval_results.get("query_analysis", {})
 
-        query_terms, exact_identifiers = self._query_features(
-            query,
-            query_analysis,
-        )
+            query_terms, exact_identifiers = self._query_features(
+                query,
+                query_analysis,
+            )
 
-        candidates = []
+            candidates = []
 
-        self._add_standard_candidates(
-            candidates,
-            results.get("symbols", []),
-            "symbol",
-            query_terms,
-            exact_identifiers,
-        )
+            # Safely get results with default empty lists
+            symbols = results.get("symbols", []) if isinstance(results.get("symbols"), list) else []
+            text_matches = results.get("text_matches", []) if isinstance(results.get("text_matches"), list) else []
+            imports = results.get("imports", []) if isinstance(results.get("imports"), list) else []
+            semantic = results.get("semantic", []) if isinstance(results.get("semantic"), list) else []
+            source_context = results.get("source_context", []) if isinstance(results.get("source_context"), list) else []
+            relationships = results.get("relationships", []) if isinstance(results.get("relationships"), list) else []
 
-        self._add_standard_candidates(
-            candidates,
-            results.get("text_matches", []),
-            "text_match",
-            query_terms,
-            exact_identifiers,
-        )
+            self._add_standard_candidates(
+                candidates,
+                symbols,
+                "symbol",
+                query_terms,
+                exact_identifiers,
+            )
 
-        self._add_standard_candidates(
-            candidates,
-            results.get("imports", []),
-            "import",
-            query_terms,
-            exact_identifiers,
-        )
+            self._add_standard_candidates(
+                candidates,
+                text_matches,
+                "text_match",
+                query_terms,
+                exact_identifiers,
+            )
 
-        self._add_semantic_candidates(
-            candidates,
-            results.get("semantic", []),
-            query_terms,
-            exact_identifiers,
-        )
+            self._add_standard_candidates(
+                candidates,
+                imports,
+                "import",
+                query_terms,
+                exact_identifiers,
+            )
 
-        self._add_standard_candidates(
-            candidates,
-            results.get("source_context", []),
-            "source_context",
-            query_terms,
-            exact_identifiers,
-        )
+            self._add_semantic_candidates(
+                candidates,
+                semantic,
+                query_terms,
+                exact_identifiers,
+            )
 
-        self._add_standard_candidates(
-            candidates,
-            results.get("relationships", []),
-            "relationship",
-            query_terms,
-            exact_identifiers,
-        )
+            self._add_standard_candidates(
+                candidates,
+                source_context,
+                "source_context",
+                query_terms,
+                exact_identifiers,
+            )
 
-        merged = self._merge_candidates(candidates)
+            self._add_standard_candidates(
+                candidates,
+                relationships,
+                "relationship",
+                query_terms,
+                exact_identifiers,
+            )
 
-        ranked = sorted(
-            merged,
-            key=self._ranking_key,
-            reverse=True,
-        )
+            merged = self._merge_candidates(candidates)
 
-        selected = ranked[:max(0, max_evidence)]
+            # Apply architectural bonuses if question type is provided
+            if question_type:
+                for candidate in merged:
+                    arch_bonus = self._get_architectural_bonus(
+                        candidate.get("file", ""),
+                        question_type
+                    )
+                    if arch_bonus > 0:
+                        candidate["evidence_score"] = min(
+                            1.50,  # Cap maximum score
+                            candidate["evidence_score"] + arch_bonus
+                        )
 
-        return {
-            "query": query,
-            "evidence": selected,
-            "summary": {
-                "candidate_count": len(candidates),
-                "unique_count": len(merged),
-                "selected_count": len(selected),
-            },
-        }
+            ranked = sorted(
+                merged,
+                key=self._ranking_key,
+                reverse=True,
+            )
+
+            selected = ranked[:max(0, max_evidence)]
+
+            return {
+                "query": query,
+                "evidence": selected,
+                "summary": {
+                    "candidate_count": len(candidates),
+                    "unique_count": len(merged),
+                    "selected_count": len(selected),
+                },
+            }
+        
+        except Exception as e:
+            # Return safe error response
+            import logging
+            logging.error(f"Error in evidence collection: {e}", exc_info=True)
+            return {
+                "query": retrieval_results.get("query", ""),
+                "evidence": [],
+                "summary": {
+                    "candidate_count": 0,
+                    "unique_count": 0,
+                    "selected_count": 0,
+                },
+                "error": str(e)
+            }
 
     # ---------------------------------------------------------
     # CANDIDATE CREATION
@@ -180,63 +229,86 @@ class EvidenceCollectorService:
         query_terms: set[str],
         exact_identifiers: set[str],
     ) -> dict:
-        symbol = result.get("symbol") or result.get("name")
-        symbol_type = (
-            result.get("symbol_type")
-            or result.get("type")
-        )
+        try:
+            symbol = result.get("symbol") or result.get("name")
+            symbol_type = (
+                result.get("symbol_type")
+                or result.get("type")
+            )
 
-        qualified_name = result.get("qualified_name")
+            qualified_name = result.get("qualified_name")
 
-        content = (
-            result.get("content")
-            or result.get("source")
-            or result.get("text")
-        )
+            content = (
+                result.get("content")
+                or result.get("source")
+                or result.get("text")
+            )
 
-        start_line = result.get("start_line")
+            start_line = result.get("start_line")
 
-        if start_line is None:
-            start_line = result.get("line")
+            if start_line is None:
+                start_line = result.get("line")
 
-        end_line = result.get("end_line")
+            end_line = result.get("end_line")
 
-        if end_line is None:
-            end_line = result.get("line")
+            if end_line is None:
+                end_line = result.get("line")
 
-        candidate = {
-            "type": evidence_type,
-            "file": result.get("file"),
-            "language": result.get("language"),
-            "symbol": symbol,
-            "symbol_type": symbol_type,
-            "qualified_name": qualified_name,
-            "start_line": start_line,
-            "end_line": end_line,
-            "content": content,
-            "score": result.get("score"),
-            "search_query": result.get("search_query"),
-            "details": result,
-            "evidence_score": base_score,
-            "query_match_score": 0.0,
-            "exact_identifier_match": False,
-        }
+            candidate = {
+                "type": evidence_type,
+                "file": result.get("file"),
+                "language": result.get("language"),
+                "symbol": symbol,
+                "symbol_type": symbol_type,
+                "qualified_name": qualified_name,
+                "start_line": start_line,
+                "end_line": end_line,
+                "content": content,
+                "score": result.get("score"),
+                "search_query": result.get("search_query"),
+                "details": result,
+                "evidence_score": base_score,
+                "query_match_score": 0.0,
+                "exact_identifier_match": False,
+            }
 
-        query_bonus, exact_match = self._query_match_bonus(
-            candidate,
-            query_terms,
-            exact_identifiers,
-        )
+            query_bonus, exact_match = self._query_match_bonus(
+                candidate,
+                query_terms,
+                exact_identifiers,
+            )
 
-        candidate["query_match_score"] = query_bonus
-        candidate["exact_identifier_match"] = exact_match
+            candidate["query_match_score"] = query_bonus
+            candidate["exact_identifier_match"] = exact_match
 
-        candidate["evidence_score"] = round(
-            min(1.35, base_score + query_bonus),
-            6,
-        )
+            candidate["evidence_score"] = round(
+                min(1.35, base_score + query_bonus),
+                6,
+            )
 
-        return candidate
+            return candidate
+        
+        except Exception as e:
+            # Return minimal valid candidate on error
+            import logging
+            logging.warning(f"Error building candidate: {e}")
+            return {
+                "type": evidence_type,
+                "file": None,
+                "language": None,
+                "symbol": None,
+                "symbol_type": None,
+                "qualified_name": None,
+                "start_line": None,
+                "end_line": None,
+                "content": None,
+                "score": None,
+                "search_query": None,
+                "details": result,
+                "evidence_score": base_score,
+                "query_match_score": 0.0,
+                "exact_identifier_match": False,
+            }
 
     # ---------------------------------------------------------
     # QUERY RELEVANCE
@@ -468,9 +540,20 @@ class EvidenceCollectorService:
     @staticmethod
     def _candidate_key(candidate: dict) -> tuple:
         file_path = candidate.get("file")
+
+        if file_path:
+            file_path = str(file_path).replace("\\", "/").casefold()
+
+        symbol = (
+            candidate.get("qualified_name")
+            or candidate.get("symbol")
+        )
+
         start_line = candidate.get("start_line")
         end_line = candidate.get("end_line")
 
+        # Key by location if we have file + line info
+        # This ensures symbol matches merge with their source_context
         if file_path and start_line is not None:
             return (
                 "location",
@@ -479,18 +562,22 @@ class EvidenceCollectorService:
                 end_line,
             )
 
-        symbol = (
-            candidate.get("qualified_name")
-            or candidate.get("symbol")
-        )
-
+        # Fallback to symbol if we have symbol but no location
         if file_path and symbol:
-            return ("symbol", file_path, symbol)
+            return (
+                "symbol",
+                file_path,
+                str(symbol).casefold(),
+            )
 
         content = candidate.get("content")
 
         if file_path and content:
-            return ("content", file_path, content)
+            return (
+                "content",
+                file_path,
+                " ".join(str(content).split()),
+            )
 
         return (
             "fallback",
@@ -592,14 +679,20 @@ class EvidenceCollectorService:
         items: list[dict],
         key: str,
     ):
+        # First pass: find first non-None, non-empty value (any score)
+        for item in items:
+            value = item.get(key)
+            if value is not None and value != "":
+                return value
+        
+        # Second pass: if all are None/empty, try sorted by score
         for item in sorted(
             items,
             key=lambda value: value["evidence_score"],
             reverse=True,
         ):
             value = item.get(key)
-
-            if value is not None and value != "":
+            if value is not None:
                 return value
 
         return None
@@ -624,3 +717,59 @@ class EvidenceCollectorService:
             return float(value or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    # ---------------------------------------------------------
+    # ARCHITECTURAL AWARENESS
+    # ---------------------------------------------------------
+    
+    def _get_architectural_bonus(
+        self,
+        file_path: str,
+        question_type: QuestionType,
+    ) -> float:
+        """
+        Calculate architectural significance bonus for a file.
+        
+        Awards higher bonuses for architecturally important files
+        when answering broad questions.
+        """
+        if not file_path:
+            return 0.0
+        
+        # No bonus for specific lookup questions
+        if question_type in (QuestionType.SYMBOL_LOOKUP, QuestionType.CALL_SITE_LOOKUP):
+            return 0.0
+        
+        filename = file_path.split("/")[-1].split("\\")[-1].lower()
+        
+        # README files are highly valuable for architectural questions
+        if question_type == QuestionType.ARCHITECTURAL_OVERVIEW:
+            if "readme" in filename:
+                return self.ARCHITECTURAL_FILE_BONUSES["readme"]
+        
+        # Entry points valuable for architecture and end-to-end flows
+        if question_type in (QuestionType.ARCHITECTURAL_OVERVIEW, QuestionType.END_TO_END_FLOW):
+            if any(name in filename for name in ["main.py", "manage.py", "app.py", "index.ts", "app.ts", "server.js", "main.ts"]):
+                return self.ARCHITECTURAL_FILE_BONUSES["entry_point"]
+        
+        # Routes valuable for feature flows and end-to-end
+        if question_type in (QuestionType.FEATURE_FLOW, QuestionType.END_TO_END_FLOW, QuestionType.ARCHITECTURAL_OVERVIEW):
+            if any(name in filename for name in ["urls.py", "routes.py", "routes.ts", "router.ts", "api.py"]):
+                return self.ARCHITECTURAL_FILE_BONUSES["routes"]
+        
+        # Models valuable for architectural and dependency analysis
+        if question_type in (QuestionType.ARCHITECTURAL_OVERVIEW, QuestionType.DEPENDENCY_ANALYSIS):
+            if "models.py" in filename or "schema.py" in filename or "entities" in filename:
+                return self.ARCHITECTURAL_FILE_BONUSES["models"]
+        
+        # Configuration valuable for cross-cutting concerns
+        if question_type in (QuestionType.CROSS_CUTTING_CONCERN, QuestionType.ARCHITECTURAL_OVERVIEW):
+            if any(name in filename for name in ["settings.py", "config.py", ".env.example", "configuration.py"]):
+                return self.ARCHITECTURAL_FILE_BONUSES["configuration"]
+        
+        # Dependencies valuable for architectural overview
+        if question_type == QuestionType.ARCHITECTURAL_OVERVIEW:
+            if any(name in filename for name in ["requirements.txt", "package.json", "pyproject.toml", "gemfile"]):
+                return self.ARCHITECTURAL_FILE_BONUSES["dependency"]
+        
+        return 0.0

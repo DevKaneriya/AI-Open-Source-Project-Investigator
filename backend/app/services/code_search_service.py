@@ -51,6 +51,10 @@ class CodeSearchService:
         )
 
         results = db.execute(statement).all()
+        
+        results.sort(
+            key=lambda result: self._match_rank(result, query)
+        )
 
         return [
             {
@@ -67,3 +71,38 @@ class CodeSearchService:
             }
             for symbol, repository_file in results
         ]
+        
+        
+    @staticmethod
+    def _match_rank(result: tuple, query: str) -> int:
+        """Rank search result match quality. Lower is better.
+        
+        Args:
+            result: tuple of (CodeSymbol, RepositoryFile)
+            query: original search query
+        """
+        symbol, repository_file = result
+        
+        query_normalized = query.strip().casefold()
+        query_compact = query_normalized.replace("_", "").replace(" ", "")
+
+        name = str(symbol.name or "").casefold()
+        qualified_name = str(symbol.qualified_name or "").casefold()
+
+        # Exact match (best)
+        if name == query_normalized or qualified_name == query_normalized:
+            return 0
+
+        # Exact match without underscores/spaces
+        if (
+            name.replace("_", "").replace(" ", "") == query_compact
+            or qualified_name.replace("_", "").replace(" ", "") == query_compact
+        ):
+            return 1
+
+        # Substring match
+        if query_normalized in name or query_normalized in qualified_name:
+            return 2
+
+        # Fuzzy match (worst)
+        return 3

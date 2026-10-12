@@ -1,5 +1,15 @@
-
+import re
 from pathlib import Path
+
+# Pattern for build artifact filenames (e.g., main-HIOYHFQA.js, chunk.3a4f5b.js)
+BUILD_ARTIFACT_PATTERN = re.compile(
+    r'[\w-]+[-\.][A-Z0-9]{6,}\.js$|'  # main-HIOYHFQA.js or chunk-ABC123.js
+    r'[\w-]+\.[a-f0-9]{8,}\.js$|'     # chunk.3a4f5b6c.js
+    r'polyfills.*\.js$|'               # polyfills-*.js
+    r'runtime.*\.js$|'                 # runtime-*.js
+    r'vendor.*\.js$',                  # vendor-*.js
+    re.IGNORECASE
+)
 
 EXCLUDED_DIRS = {
     ".git",
@@ -18,6 +28,9 @@ EXCLUDED_DIRS = {
     ".mypy_cache",
     ".ruff_cache",
     "site-packages",
+    "public",  # Exclude frontend build output directories
+    ".output",  # Nuxt output
+    "out",  # Next.js output
 }
 
 EXCLUDED_NAMES = {
@@ -25,6 +38,7 @@ EXCLUDED_NAMES = {
     ".env.local",
     ".env.production",
     "database_backup.json",
+    # Note: .env.example is NOT excluded - it contains configuration documentation
 }
 
 EXCLUDED_SUFFIXES = {
@@ -89,6 +103,10 @@ def should_include_file(root: str | Path, file_path: str | Path) -> bool:
         return False
 
     if compound_suffix in EXCLUDED_SUFFIXES:
+        return False
+
+    # Exclude build artifact files with hash patterns
+    if BUILD_ARTIFACT_PATTERN.search(name):
         return False
 
     try:

@@ -50,7 +50,7 @@ class RepositorySearchService:
                                 file_path.relative_to(root)
                             ),
                             "line": line_number,
-                            "content": line.strip(),
+                            "text": line.strip(),  # Changed from 'content' to 'text' for consistency
                         }
                     )
 

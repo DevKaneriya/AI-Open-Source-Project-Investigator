@@ -37,12 +37,19 @@ from backend.app.services.evidence_collector_service import (
     EvidenceCollectorService,
 )
 
+from backend.app.services.architectural_file_service import (
+    ArchitecturalFileService,
+)
+
+from backend.app.models.query_analysis import QuestionType
+
 
 class RetrievalService:
 
     MAX_SYMBOL_QUERIES = 5
     MAX_TEXT_QUERIES = 5
     MAX_IMPORT_QUERIES = 3
+    MAX_SOURCE_CONTEXTS = 10  # Maximum number of source code contexts to retrieve
 
     def __init__(
         self,
@@ -79,6 +86,10 @@ class RetrievalService:
             EvidenceCollectorService()
         )
 
+        self.architectural_file_service = (
+            ArchitecturalFileService()
+        )
+
     # =============================================================
     # MAIN RETRIEVAL PIPELINE
     # =============================================================
@@ -90,6 +101,9 @@ class RetrievalService:
         query: str,
         semantic_limit: int = 10,
     ) -> dict:
+
+        import time
+        start_time = time.time()
 
         query = query.strip()
 
@@ -117,9 +131,22 @@ class RetrievalService:
         # 1. Analyze user query
         # ---------------------------------------------------------
 
-        query_analysis = (
-            self.query_analyzer_service.analyze(query)
-        )
+        try:
+            query_analysis = (
+                self.query_analyzer_service.analyze(query)
+            )
+        except RuntimeError as e:
+            # LLM service configuration error
+            raise RuntimeError(
+                f"Query analysis failed due to LLM service configuration: {str(e)}"
+            )
+        except Exception as e:
+            # Other LLM-related errors (network, rate limits, parsing)
+            import logging
+            logging.error(f"Query analysis error: {e}", exc_info=True)
+            raise RuntimeError(
+                f"Query analysis failed: {str(e)}"
+            )
 
         symbol_queries = self._prepare_queries(
             query_analysis.symbol_queries,
@@ -137,7 +164,34 @@ class RetrievalService:
         )
 
         # ---------------------------------------------------------
-        # 2. Run deterministic searches independently
+        # 2. Multi-Stage Retrieval for Architectural Questions
+        #
+        # For broad architectural questions, we use a staged approach:
+        # 1. Discover key architectural files first
+        # 2. Extract their contents for immediate evidence
+        # 3. Then run standard searches with reduced semantic limit
+        # ---------------------------------------------------------
+
+        architectural_evidence = []
+        adjusted_semantic_limit = semantic_limit
+
+        if query_analysis.question_type in (
+            QuestionType.ARCHITECTURAL_OVERVIEW,
+            QuestionType.CROSS_CUTTING_CONCERN,
+        ):
+            # Discover and extract key architectural files
+            architectural_evidence = self._staged_architectural_retrieval(
+                db=db,
+                repository_id=repository_id,
+                repository_path=repository.local_path,
+                question_type=query_analysis.question_type,
+            )
+
+            # Reduce semantic search limit since we already have targeted evidence
+            adjusted_semantic_limit = max(5, semantic_limit // 2)
+
+        # ---------------------------------------------------------
+        # 3. Run deterministic searches independently
         # ---------------------------------------------------------
 
         symbol_results = []
@@ -184,64 +238,94 @@ class RetrievalService:
 
                 result_type = futures[future]
 
-                result = future.result()
+                try:
+                    result = future.result()
 
-                if result_type == "symbols":
-                    symbol_results = result
+                    if result_type == "symbols":
+                        symbol_results = result
 
-                elif result_type == "text":
-                    text_results = result
+                    elif result_type == "text":
+                        text_results = result
 
-                elif result_type == "imports":
-                    import_results = result
+                    elif result_type == "imports":
+                        import_results = result
+
+                except Exception as e:
+                    # Log error but continue with other searches
+                    import logging
+                    logging.error(
+                        f"Error in parallel {result_type} search: {e}",
+                        exc_info=True
+                    )
+                    # Leave results as empty list for this search type
+                    continue
 
         # ---------------------------------------------------------
-        # 3. Semantic search
+        # 4. Semantic search
         #
         # IMPORTANT:
         # Use the original user query unchanged.
+        # Use adjusted limit for architectural questions.
         # ---------------------------------------------------------
 
-        semantic_results = (
-            self.semantic_search_service.search(
-                db=db,
-                repository_id=repository_id,
-                query=query,
-                limit=semantic_limit,
+        semantic_results = []
+        
+        try:
+            semantic_results = (
+                self.semantic_search_service.search(
+                    db=db,
+                    repository_id=repository_id,
+                    query=query,
+                    limit=adjusted_semantic_limit,
+                )
             )
+        except Exception as e:
+            # Log error but continue without semantic results
+            import logging
+            logging.warning(f"Semantic search failed: {e}")
+            semantic_results = []
+
+        # ---------------------------------------------------------
+        # 5. Exact source retrieval
+        # ---------------------------------------------------------
+
+        source_candidates = (
+            symbol_results
+            + text_results
+            + semantic_results
+        )
+
+        source_context = self._build_source_context(
+            repository.local_path,
+            source_candidates,
         )
 
         # ---------------------------------------------------------
-        # 4. Exact source retrieval
-        # ---------------------------------------------------------
-
-        source_context = (
-            self._build_source_context(
-                repository.local_path,
-                symbol_results,
-            )
-        )
-
-        # ---------------------------------------------------------
-        # 5. Code relationships
+        # 6. Code relationships
         #
-        # TEMPORARILY DISABLED.
-        #
-        # Current Tree-sitter call extraction is producing
-        # malformed values such as:
-        #
-        #     o.ject({
-        #     s.ring()
-        #     i.o.d.tetime()
-        #
-        # We must not expose corrupted relationships to the
-        # investigation/evidence pipeline.
+        # Call graph relationships show which functions call which.
+        # Critical for understanding execution flows and dependencies.
         # ---------------------------------------------------------
 
         relationships = []
+        
+        # Only extract relationships for questions that benefit from call graphs
+        extract_relationships = query_analysis.question_type in (
+            query_analysis.question_type.CALL_SITE_LOOKUP,
+            query_analysis.question_type.FEATURE_FLOW,
+            query_analysis.question_type.END_TO_END_FLOW,
+            query_analysis.question_type.DEPENDENCY_ANALYSIS,
+        )
+        
+        if extract_relationships and symbol_results:
+            relationships = self._build_relationships(
+                db=db,
+                repository_id=repository_id,
+                symbol_results=symbol_results[:10],  # Limit to top 10 symbols
+            )
 
         # ---------------------------------------------------------
-        # 6. Build raw retrieval result
+        # 7. Build raw retrieval result
         # ---------------------------------------------------------
 
         retrieval_result = {
@@ -256,6 +340,7 @@ class RetrievalService:
 
             "query_analysis": {
                 "intent": query_analysis.intent,
+                "question_type": query_analysis.question_type.value,  # Include question type
                 "concepts": query_analysis.concepts,
                 "symbol_queries": symbol_queries,
                 "text_queries": text_queries,
@@ -275,6 +360,8 @@ class RetrievalService:
                 "source_context": source_context,
 
                 "relationships": relationships,
+
+                "architectural_files": architectural_evidence,  # New: staged architectural evidence
             },
 
             "summary": {
@@ -302,26 +389,93 @@ class RetrievalService:
                 "relationships": len(
                     relationships
                 ),
+
+                "architectural_files": len(
+                    architectural_evidence
+                ),
             },
         }
 
         # ---------------------------------------------------------
-        # 7. Collect and rank evidence
+        # 8. Collect and rank evidence
         # ---------------------------------------------------------
 
-        evidence = (
-            self.evidence_collector_service.collect(
-                retrieval_results=retrieval_result,
+        evidence_data = {}
+        
+        try:
+            evidence_data = (
+                self.evidence_collector_service.collect(
+                    retrieval_results=retrieval_result,
+                    question_type=query_analysis.question_type,  # Pass question type for architectural bonuses
+                )
             )
-        )
+        except Exception as e:
+            # Log error but return results without ranked evidence
+            import logging
+            logging.error(f"Evidence collection failed: {e}", exc_info=True)
+            evidence_data = {
+                "query": query,
+                "evidence": [],
+                "summary": {
+                    "candidate_count": 0,
+                    "unique_count": 0,
+                    "selected_count": 0,
+                },
+                "error": f"Evidence ranking failed: {str(e)}"
+            }
 
         # ---------------------------------------------------------
-        # 8. Add curated evidence to response
+        # 9. Build final optimized response
         # ---------------------------------------------------------
 
-        retrieval_result["evidence"] = evidence
+        execution_time = round(time.time() - start_time, 3)
 
-        return retrieval_result
+        # Remove duplicate query from evidence data
+        ranked_evidence = evidence_data.get("evidence", [])
+        evidence_summary = evidence_data.get("summary", {})
+        evidence_error = evidence_data.get("error")
+
+        # Transform evidence for API response
+        transformed_evidence = self._transform_evidence_for_response(ranked_evidence)
+
+        final_response = {
+            # Core query information
+            "query": query,
+            "repository": retrieval_result["repository"],
+            
+            # Query understanding
+            "query_analysis": retrieval_result["query_analysis"],
+            
+            # Primary ranked evidence (most important for UI)
+            "evidence": transformed_evidence,
+            
+            # Detailed raw results (for debugging or advanced use)
+            "raw_results": retrieval_result["results"],
+            
+            # Summary statistics
+            "summary": {
+                **retrieval_result["summary"],
+                "evidence_candidates": evidence_summary.get("candidate_count", 0),
+                "evidence_selected": evidence_summary.get("selected_count", 0),
+                "execution_time_seconds": execution_time,
+            },
+            
+            # Metadata
+            "metadata": {
+                "version": "1.0",
+                "timestamp": time.time(),
+                "relationships_enabled": True,  # Re-enabled with question-type filtering
+            }
+        }
+
+        # Add error information if evidence ranking failed
+        if evidence_error:
+            final_response["warnings"] = [{
+                "type": "evidence_ranking_failure",
+                "message": evidence_error
+            }]
+
+        return final_response
 
     # =============================================================
     # QUERY PREPARATION
@@ -380,36 +534,49 @@ class RetrievalService:
 
             for query in queries:
 
-                matches = service.search(
-                    db=db,
-                    repository_id=repository_id,
-                    query=query,
-                )
-
-                for result in matches:
-
-                    key = (
-                        result["file"],
-                        result["name"],
-                        result["start_line"],
-                        result["end_line"],
+                try:
+                    matches = service.search(
+                        db=db,
+                        repository_id=repository_id,
+                        query=query,
                     )
 
-                    if key in seen:
-                        continue
+                    for result in matches:
 
-                    seen.add(key)
+                        key = (
+                            result["file"],
+                            result["name"],
+                            result["start_line"],
+                            result["end_line"],
+                        )
 
-                    # Preserve which analyzer-generated query
-                    # produced this result.
-                    results.append(
-                        {
-                            **result,
-                            "search_query": query,
-                        }
-                    )
+                        if key in seen:
+                            continue
+
+                        seen.add(key)
+
+                        # Preserve which analyzer-generated query
+                        # produced this result.
+                        results.append(
+                            {
+                                **result,
+                                "search_query": query,
+                            }
+                        )
+                
+                except Exception as e:
+                    # Log error but continue with other queries
+                    import logging
+                    logging.warning(f"Error searching symbols for query '{query}': {e}")
+                    continue
 
             return results
+
+        except Exception as e:
+            # Log critical error and return empty results
+            import logging
+            logging.error(f"Critical error in _search_symbols: {e}", exc_info=True)
+            return []
 
         finally:
 
@@ -425,42 +592,56 @@ class RetrievalService:
         queries: list[str],
     ) -> list[dict]:
 
-        service = RepositorySearchService()
+        try:
+            service = RepositorySearchService()
 
-        results = []
+            results = []
 
-        seen = set()
+            seen = set()
 
-        for query in queries:
+            for query in queries:
 
-            matches = service.search_text(
-                repository_path=repository_path,
-                query=query,
-            )
+                try:
+                    matches = service.search_text(
+                        repository_path=repository_path,
+                        query=query,
+                    )
 
-            for result in matches:
+                    for result in matches:
 
-                key = (
-                    result.get("file"),
-                    result.get("line"),
-                    result.get("text"),
-                )
+                        key = (
+                            result.get("file"),
+                            result.get("line"),
+                            result.get("text"),
+                        )
 
-                if key in seen:
+                        if key in seen:
+                            continue
+
+                        seen.add(key)
+
+                        # Preserve which analyzer-generated query
+                        # produced this result.
+                        results.append(
+                            {
+                                **result,
+                                "search_query": query,
+                            }
+                        )
+                
+                except Exception as e:
+                    # Log error but continue with other queries
+                    import logging
+                    logging.warning(f"Error searching text for query '{query}': {e}")
                     continue
 
-                seen.add(key)
+            return results
 
-                # Preserve which analyzer-generated query
-                # produced this result.
-                results.append(
-                    {
-                        **result,
-                        "search_query": query,
-                    }
-                )
-
-        return results
+        except Exception as e:
+            # Log critical error and return empty results
+            import logging
+            logging.error(f"Critical error in _search_text: {e}", exc_info=True)
+            return []
 
     # =============================================================
     # PARALLEL IMPORT SEARCH
@@ -484,34 +665,47 @@ class RetrievalService:
 
             for query in queries:
 
-                matches = service.search(
-                    db=db,
-                    repository_id=repository_id,
-                    query=query,
-                )
-
-                for result in matches:
-
-                    key = (
-                        result["file"],
-                        result["import"],
+                try:
+                    matches = service.search(
+                        db=db,
+                        repository_id=repository_id,
+                        query=query,
                     )
 
-                    if key in seen:
-                        continue
+                    for result in matches:
 
-                    seen.add(key)
+                        key = (
+                            result["file"],
+                            result["import"],
+                        )
 
-                    # Preserve which analyzer-generated query
-                    # produced this result.
-                    results.append(
-                        {
-                            **result,
-                            "search_query": query,
-                        }
-                    )
+                        if key in seen:
+                            continue
+
+                        seen.add(key)
+
+                        # Preserve which analyzer-generated query
+                        # produced this result.
+                        results.append(
+                            {
+                                **result,
+                                "search_query": query,
+                            }
+                        )
+                
+                except Exception as e:
+                    # Log error but continue with other queries
+                    import logging
+                    logging.warning(f"Error searching imports for query '{query}': {e}")
+                    continue
 
             return results
+
+        except Exception as e:
+            # Log critical error and return empty results
+            import logging
+            logging.error(f"Critical error in _search_imports: {e}", exc_info=True)
+            return []
 
         finally:
 
@@ -522,25 +716,51 @@ class RetrievalService:
     # =============================================================
 
     def _build_source_context(
-        self,
-        repository_path: str,
-        symbol_results: list[dict],
+    self,
+    repository_path: str,
+    candidates: list[dict],
     ) -> list[dict]:
-
+        """Extract source code for candidates from multiple search types.
+        
+        Handles results from:
+        - Symbol search (has start_line, end_line)
+        - Text search (has line, text)
+        - Semantic search (has start_line, end_line, content)
+        """
         contexts = []
-
         seen = set()
 
-        for result in symbol_results[:10]:
+        for result in candidates:
+            file_path = result.get("file")
 
-            file_path = result["file"]
+            # Normalize line number fields from different search types
+            start_line = result.get("start_line")
+            if start_line is None:
+                start_line = result.get("line")  # Text search uses "line"
 
-            start_line = result["start_line"]
+            end_line = result.get("end_line")
+            if end_line is None:
+                end_line = start_line  # Text search has single line
 
-            end_line = result["end_line"]
+            if not file_path or start_line is None:
+                continue
+
+            try:
+                start_line = int(start_line)
+                end_line = int(end_line) if end_line else start_line
+            except (TypeError, ValueError):
+                continue
+
+            if start_line < 1 or end_line < start_line:
+                continue
+
+            # Expand context for single-line matches (from text search)
+            if start_line == end_line:
+                start_line = max(1, start_line - 3)
+                end_line = end_line + 10
 
             key = (
-                file_path,
+                str(file_path).replace("\\", "/"),
                 start_line,
                 end_line,
             )
@@ -551,37 +771,19 @@ class RetrievalService:
             seen.add(key)
 
             try:
-
-                source = (
-                    self.code_retrieval_service.get_source(
-                        repository_path=repository_path,
-                        file_path=file_path,
-                        start_line=start_line,
-                        end_line=end_line,
-                    )
+                source = self.code_retrieval_service.get_source(
+                    repository_path=repository_path,
+                    file_path=file_path,
+                    start_line=start_line,
+                    end_line=end_line,
                 )
+                contexts.append(source)
 
-                contexts.append(
-                    {
-                        **source,
-                        "symbol": result.get("name"),
-                        "symbol_type": result.get("type"),
-                        "qualified_name": result.get(
-                            "qualified_name"
-                        ),
-                        "search_query": result.get(
-                            "search_query"
-                        ),
-                    }
-                )
-
-            except (
-                FileNotFoundError,
-                OSError,
-                UnicodeDecodeError,
-                ValueError,
-            ):
+            except (FileNotFoundError, ValueError, OSError):
                 continue
+
+            if len(contexts) >= self.MAX_SOURCE_CONTEXTS:
+                break
 
         return contexts
 
@@ -599,7 +801,12 @@ class RetrievalService:
         repository_id: int,
         symbol_results: list[dict],
     ) -> list[dict]:
-
+        """
+        Build call relationships for top symbol results.
+        
+        Shows which functions call which other functions.
+        Critical for understanding execution flows.
+        """
         relationships = []
 
         seen_symbols = set()
@@ -613,15 +820,162 @@ class RetrievalService:
 
             seen_symbols.add(symbol_name)
 
-            calls = (
-                self.code_relationship_service
-                .get_calls(
-                    db=db,
-                    repository_id=repository_id,
-                    symbol_name=symbol_name,
+            try:
+                calls = (
+                    self.code_relationship_service
+                    .get_calls(
+                        db=db,
+                        repository_id=repository_id,
+                        symbol_name=symbol_name,
+                    )
                 )
-            )
 
-            relationships.extend(calls)
+                # Filter out malformed call names (e.g., single char like '$')
+                valid_calls = [
+                    call for call in calls
+                    if call.get("called_name") 
+                    and len(call["called_name"]) > 1
+                    and not any(
+                        char in call["called_name"] 
+                        for char in ['{', '}', '(', ')', '[', ']', ',', ';']
+                    )
+                ]
+
+                relationships.extend(valid_calls)
+                
+            except Exception as e:
+                # Log but continue if relationship lookup fails
+                import logging
+                logging.warning(f"Failed to get relationships for {symbol_name}: {e}")
+                continue
 
         return relationships
+
+    # =============================================================
+    # MULTI-STAGE ARCHITECTURAL RETRIEVAL
+    # =============================================================
+
+    def _staged_architectural_retrieval(
+        self,
+        db: Session,
+        repository_id: int,
+        repository_path: str,
+        question_type: QuestionType,
+    ) -> list[dict]:
+        """
+        Multi-stage retrieval for architectural questions.
+        
+        Discovers and extracts key architectural files based on question type:
+        - ARCHITECTURAL_OVERVIEW: README → entry points → dependencies → routes → models
+        - CROSS_CUTTING_CONCERN: configuration files → dependencies → relevant code
+        
+        Returns list of file evidence with source content.
+        """
+        architectural_files = self.architectural_file_service.discover_key_files(
+            db=db,
+            repository_id=repository_id,
+        )
+        
+        evidence = []
+        seen_paths = set()
+        
+        if question_type == QuestionType.ARCHITECTURAL_OVERVIEW:
+            # For architectural overview: README + entry points + dependencies
+            priority_order = [
+                architectural_files["readme"][:1],  # Top README only
+                architectural_files["entry_points"][:2],  # Top 2 entry points
+                architectural_files["dependencies"][:2],  # Top 2 dependency files
+                architectural_files["routes"][:2],  # Top 2 route files
+                architectural_files["models"][:1],  # Top model file
+            ]
+            
+        elif question_type == QuestionType.CROSS_CUTTING_CONCERN:
+            # For cross-cutting concerns: config + dependencies + routes
+            priority_order = [
+                architectural_files["configuration"][:3],  # Top 3 config files
+                architectural_files["dependencies"][:1],  # Top dependency file
+                architectural_files["routes"][:2],  # Routes may show middleware
+            ]
+        
+        else:
+            # Fallback: just README and entry point
+            priority_order = [
+                architectural_files["readme"][:1],
+                architectural_files["entry_points"][:1],
+            ]
+        
+        # Extract source content for prioritized files
+        for file_group in priority_order:
+            for repo_file in file_group:
+                if repo_file.path in seen_paths:
+                    continue
+                
+                seen_paths.add(repo_file.path)
+                
+                try:
+                    # Read entire file and get actual line count
+                    from pathlib import Path
+                    full_path = Path(repository_path) / repo_file.path
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        line_count = sum(1 for _ in f)
+                    
+                    # Get full file content (limited to 500 lines for large files)
+                    max_lines = min(line_count, 500)
+                    
+                    source = self.code_retrieval_service.get_source(
+                        repository_path=repository_path,
+                        file_path=repo_file.path,
+                        start_line=1,
+                        end_line=max_lines,  # Limit to first 500 lines
+                    )
+                    
+                    # Add architectural file category
+                    file_category = self.architectural_file_service.get_file_category(repo_file.path)
+                    source["architectural_category"] = file_category
+                    source["total_lines"] = line_count  # Add total line count for reference
+                    
+                    evidence.append(source)
+                    
+                except (FileNotFoundError, ValueError, OSError) as e:
+                    import logging
+                    logging.warning(f"Failed to extract architectural file {repo_file.path}: {e}")
+                    continue
+        
+        return evidence
+
+    # =============================================================
+    # EVIDENCE TRANSFORMATION
+    # =============================================================
+    
+    def _transform_evidence_for_response(
+        self,
+        evidence: list[dict],
+    ) -> list[dict]:
+        """
+        Transform internal evidence format to API response format.
+        
+        Maps:
+        - content → snippet (with the actual source code)
+        - evidence_score → relevance_score
+        - Ensures all fields are present
+        """
+        transformed = []
+        
+        for item in evidence:
+            transformed_item = {
+                "file": item.get("file"),
+                "language": item.get("language"),
+                "symbol": item.get("symbol"),
+                "symbol_type": item.get("symbol_type"),
+                "qualified_name": item.get("qualified_name"),
+                "start_line": item.get("start_line"),
+                "end_line": item.get("end_line"),
+                "snippet": item.get("content", ""),  # Map content → snippet
+                "relevance_score": item.get("evidence_score", 0.0),  # Map evidence_score → relevance_score
+                "types": item.get("types", []),
+                "exact_match": item.get("exact_identifier_match", False),
+            }
+            
+            transformed.append(transformed_item)
+        
+        return transformed
