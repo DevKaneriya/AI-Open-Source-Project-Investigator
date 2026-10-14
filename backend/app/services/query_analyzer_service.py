@@ -115,6 +115,11 @@ Question: "How is caching implemented?"
             system_prompt=self.SYSTEM_PROMPT,
             user_prompt=query,
             response_schema=QueryAnalysis.model_json_schema(),
+            max_tokens=1536,  # Increased for prompt-only mode with schema injection
         )
+        
+        # Extract and remove metadata before Pydantic validation
+        result.pop('__llm_metadata__', None)
+        result.pop('_metadata', None)
 
         return QueryAnalysis.model_validate(result)

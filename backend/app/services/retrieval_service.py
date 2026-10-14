@@ -178,6 +178,7 @@ class RetrievalService:
         if query_analysis.question_type in (
             QuestionType.ARCHITECTURAL_OVERVIEW,
             QuestionType.CROSS_CUTTING_CONCERN,
+            QuestionType.DEPENDENCY_ANALYSIS,
         ):
             # Discover and extract key architectural files
             architectural_evidence = self._staged_architectural_retrieval(
@@ -315,6 +316,7 @@ class RetrievalService:
             query_analysis.question_type.FEATURE_FLOW,
             query_analysis.question_type.END_TO_END_FLOW,
             query_analysis.question_type.DEPENDENCY_ANALYSIS,
+            query_analysis.question_type.CROSS_CUTTING_CONCERN,  # Added: helps trace patterns
         )
         
         if extract_relationships and symbol_results:
@@ -802,7 +804,11 @@ class RetrievalService:
         symbol_results: list[dict],
     ) -> list[dict]:
         """
-        Build call relationships for top symbol results.
+        Build call relationships for top symbol results AND retrieve source for called symbols.
+        
+        For feature flows, this helps trace execution paths by:
+        1. Finding what each symbol calls
+        2. Retrieving the actual implementation of called symbols
         
         Shows which functions call which other functions.
         Critical for understanding execution flows.
@@ -889,6 +895,14 @@ class RetrievalService:
                 architectural_files["models"][:1],  # Top model file
             ]
             
+        elif question_type == QuestionType.DEPENDENCY_ANALYSIS:
+            # For dependency analysis: ALL dependencies + package manifests + config
+            # Retrieve FULL content (not limited to 500 lines) for manifests
+            priority_order = [
+                architectural_files["dependencies"],  # ALL dependency files (not limited)
+                architectural_files["configuration"][:2],  # Top 2 config files
+            ]
+            
         elif question_type == QuestionType.CROSS_CUTTING_CONCERN:
             # For cross-cutting concerns: config + dependencies + routes
             priority_order = [
@@ -919,20 +933,35 @@ class RetrievalService:
                     with open(full_path, 'r', encoding='utf-8') as f:
                         line_count = sum(1 for _ in f)
                     
-                    # Get full file content (limited to 500 lines for large files)
-                    max_lines = min(line_count, 500)
+                    # For dependency manifests, retrieve FULL content (no 500-line limit)
+                    # For other files, limit to 500 lines
+                    is_dependency_manifest = (
+                        question_type == QuestionType.DEPENDENCY_ANALYSIS and
+                        any(repo_file.path.endswith(ext) for ext in [
+                            'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+                            'requirements.txt', 'pyproject.toml', 'Pipfile', 'Pipfile.lock',
+                            'pom.xml', 'build.gradle', 'Cargo.toml', 'go.mod', 'go.sum'
+                        ])
+                    )
+                    
+                    if is_dependency_manifest:
+                        max_lines = min(line_count, 2000)  # Allow up to 2000 lines for manifests
+                    else:
+                        max_lines = min(line_count, 500)  # Limit other files to 500 lines
                     
                     source = self.code_retrieval_service.get_source(
                         repository_path=repository_path,
                         file_path=repo_file.path,
                         start_line=1,
-                        end_line=max_lines,  # Limit to first 500 lines
+                        end_line=max_lines,
                     )
                     
                     # Add architectural file category
                     file_category = self.architectural_file_service.get_file_category(repo_file.path)
                     source["architectural_category"] = file_category
                     source["total_lines"] = line_count  # Add total line count for reference
+                    if line_count > max_lines:
+                        source["is_truncated"] = True  # Mark if content was truncated
                     
                     evidence.append(source)
                     
