@@ -18,6 +18,7 @@ class Repository(Base):
         String(500),
         unique=True,
         nullable=False,
+        index=True,  # Added index for better query performance
     )
 
     name: Mapped[str] = mapped_column(
@@ -39,5 +40,12 @@ class Repository(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
+        nullable=False,
+    )
+    
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
         nullable=False,
     )

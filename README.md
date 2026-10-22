@@ -1,973 +1,568 @@
 # AI Open-Source Project Investigator
 
-An intelligent code analysis system that understands repository architecture, traces feature flows, and provides context-aware evidence for technical questions. Built to help developers quickly understand unfamiliar codebases.
-
-## 🎯 Overview
-
-This system combines multiple retrieval strategies—symbol search, text matching, semantic search, and relationship tracing—to answer questions ranging from "Where is X defined?" to "Explain the entire project architecture."
-
-### Key Capabilities
-
-- **Architecture-Aware Retrieval**: Automatically discovers and prioritizes README files, entry points, configuration, routes, and models for architectural questions
-- **Intelligent Question Classification**: Distinguishes between symbol lookups, feature flows, architectural overviews, and cross-cutting concerns
-- **Multi-Source Evidence Fusion**: Combines deterministic (symbol/text) and semantic search with call-graph relationships
-- **Smart Evidence Ranking**: Prioritizes exact matches, architectural significance, and source agreement
+An agentic code-analysis system that understands repository architecture, traces feature flows, and answers technical questions with evidence grounded directly in source code.
 
 ---
 
-## 🏗️ System Architecture
+## What It Does
 
-### High-Level Flow
+Point the system at any public GitHub repository. After indexing, ask natural-language questions and get answers backed by cited source snippets — not guesses.
 
-```
-User Query
-    ↓
-Query Analysis (LLM) → Classify question type + Extract search terms
-    ↓
-┌─────────────────────────────────────────┐
-│ Multi-Stage Retrieval                   │
-├─────────────────────────────────────────┤
-│ Architectural Overview?                 │
-│  → Discover: README, entry points,      │
-│    config, routes, models               │
-│                                         │
-│ Feature Flow / Cross-Cutting?           │
-│  → Run: Symbol + Text + Semantic        │
-│  → Extract: Call relationships          │
-│                                         │
-│ Symbol Lookup?                          │
-│  → Direct: Symbol search only           │
-└─────────────────────────────────────────┘
-    ↓
-Evidence Collection → Merge, deduplicate, rank
-    ↓
-Response Transformation → API format
-    ↓
-JSON Response with ranked evidence
-```
+**Example questions:**
+- *"How does the checkout flow work from the Angular UI to the Django backend?"*
+- *"Locate CartSyncView and explain its GET and POST implementation."*
+- *"What are the exact Angular and Django versions?"*
+- *"How is Razorpay payment verification implemented?"*
 
 ---
 
-## 📁 Project Structure
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| API | FastAPI (Python) |
+| Database | PostgreSQL + SQLAlchemy 2.0 |
+| Migrations | Alembic |
+| Vector DB | Qdrant (local file mode) |
+| Embeddings | `BAAI/bge-small-en-v1.5` (sentence-transformers) |
+| LLM | Groq API (configurable model) |
+| Parsing | Tree-sitter + Python AST |
+
+---
+
+## Project Structure
 
 ```
 AI-OpenSource-Project-Investigator/
 ├── backend/
-│   └── app/
-│       ├── main.py                    # FastAPI application & endpoints
-│       ├── core/
-│       │   ├── config.py             # Configuration settings
-│       │   └── database.py           # SQLAlchemy setup
-│       ├── models/                   # Database models
-│       │   ├── repository.py         # Repository metadata
-│       │   ├── repository_file.py    # Indexed files
-│       │   ├── code_symbol.py        # Functions, classes, methods
-│       │   ├── code_chunk.py         # Semantic chunks
-│       │   ├── code_call.py          # Call relationships
-│       │   ├── code_import.py        # Import statements
-│       │   └── query_analysis.py     # Query classification types
-│       └── services/
-│           ├── retrieval_service.py              # 🔥 Main orchestrator
-│           ├── query_analyzer_service.py         # LLM-powered classification
-│           ├── evidence_collector_service.py     # Ranking & deduplication
-│           ├── architectural_file_service.py     # Key file discovery
-│           ├── code_search_service.py            # Symbol search
-│           ├── repository_search_service.py      # Text search (ripgrep)
-│           ├── semantic_search_service.py        # Vector similarity
-│           ├── code_relationship_service.py      # Call graph queries
-│           ├── code_retrieval_service.py         # Source extraction
-│           ├── github_service.py                 # Repository cloning
-│           ├── repository_scanner.py             # File discovery
-│           ├── code_indexer.py                   # Tree-sitter parsing
-│           ├── embedding_service.py              # Text embeddings
-│           ├── vector_service.py                 # Qdrant interface
-│           ├── vector_indexing_service.py        # Chunk indexing
-│           └── llm_service.py                    # Groq API client
+│   ├── alembic/                    # Database migrations
+│   │   ├── env.py                  # Migration environment
+│   │   └── versions/               # Migration files
+│   ├── app/
+│   │   ├── main.py                 # FastAPI app + all endpoints
+│   │   ├── core/
+│   │   │   ├── config.py           # Pydantic settings (reads .env)
+│   │   │   └── database.py         # SQLAlchemy engine + session
+│   │   ├── models/                 # SQLAlchemy ORM models
+│   │   │   ├── repository.py
+│   │   │   ├── repository_file.py
+│   │   │   ├── code_symbol.py
+│   │   │   ├── code_chunk.py
+│   │   │   ├── code_call.py
+│   │   │   ├── code_import.py
+│   │   │   ├── query_analysis.py   # Pydantic schema for LLM output
+│   │   │   └── investigation_answer.py  # Response schema
+│   │   └── services/
+│   │       ├── retrieval_service.py           # Main orchestrator
+│   │       ├── query_analyzer_service.py      # LLM + fallback
+│   │       ├── answer_generation_service.py   # Evidence-grounded answers
+│   │       ├── evidence_collector_service.py  # Merge + rank evidence
+│   │       ├── architectural_file_service.py  # Find key files
+│   │       ├── code_search_service.py         # Symbol DB search
+│   │       ├── repository_search_service.py   # Full-text file search
+│   │       ├── semantic_search_service.py     # Qdrant vector search
+│   │       ├── code_relationship_service.py   # Call graph queries
+│   │       ├── code_retrieval_service.py      # Source extraction
+│   │       ├── code_indexer.py                # Parse + index
+│   │       ├── code_chunk_service.py          # Chunking
+│   │       ├── code_analyzer.py               # Python AST
+│   │       ├── tree_sitter_analyzer.py        # JS/TS AST
+│   │       ├── embedding_service.py           # sentence-transformers
+│   │       ├── vector_service.py              # Qdrant client
+│   │       ├── vector_indexing_service.py     # Embed + upsert chunks
+│   │       ├── github_service.py              # Clone repos
+│   │       ├── repository_scanner.py          # File discovery
+│   │       ├── repository_service.py          # Repo CRUD
+│   │       ├── language_service.py            # Extension → language
+│   │       ├── file_filter_service.py         # Exclusion rules
+│   │       ├── import_search_service.py       # Import DB search
+│   │       └── search_normalizer.py           # Query normalisation
+│   ├── scripts/
+│   │   ├── reindex.py              # Re-index a repository
+│   │   ├── run_regression.py       # Run 10 benchmark queries
+│   │   ├── verify_schema.py        # Check DB matches models
+│   │   ├── apply_migrations.ps1    # Apply pending migrations
+│   │   └── create_migration.ps1    # Generate a new migration
+│   └── tests/
+│       ├── test_query_analyzer_service.py  # 25 tests
+│       ├── test_evidence_grounding.py      # 16 tests
+│       ├── test_llm_service.py             # 15 tests
+│       └── test_service_units.py           # 40 tests
 ├── data/
-│   └── qdrant/                       # Vector database storage
-├── check_data.py                     # Database inspection utility
-├── check_redis.py                    # Redis connection test
-├── check_relationships.py            # Call graph inspection
-├── start_server.ps1                  # Production server launcher
-├── start_server_dev.ps1              # Development server launcher
-├── stop_server.ps1                   # Server cleanup script
-└── TROUBLESHOOTING.md                # Common issues & solutions
+│   └── qdrant/                     # Qdrant local storage
+├── alembic.ini                     # Alembic config
+├── requirements.txt
+├── check_data.py                   # Inspect indexed DB stats
+├── check_relationships.py          # Inspect call graph data
+├── start_server.ps1
+├── start_server_dev.ps1
+├── stop_server.ps1
+└── TROUBLESHOOTING.md
 ```
 
 ---
 
-## 🔧 Core Services
+## Quick Start
 
-### 1. **Retrieval Service** (`retrieval_service.py`)
-**Purpose**: Main orchestration layer that coordinates all retrieval strategies.
+### 1. Prerequisites
 
-**Key Methods**:
-- `retrieve(db, repository_id, query, semantic_limit)`: Main entry point
-- `_staged_architectural_retrieval()`: Discovers and extracts key architectural files
-- `_build_source_context()`: Extracts source code for matched locations
-- `_build_relationships()`: Retrieves call-graph relationships
-- `_transform_evidence_for_response()`: Formats output for API
+- Python 3.12+
+- PostgreSQL running locally
+- `uv` package manager (`pip install uv`)
+- Groq API key (free at [console.groq.com](https://console.groq.com))
 
-**Process Flow**:
-1. Analyze query with LLM
-2. Determine if architectural/feature/symbol question
-3. Run appropriate retrieval strategy
-4. Merge all evidence sources
-5. Rank and return top results
+### 2. Install Dependencies
 
-**Question-Type Routing**:
-- **ARCHITECTURAL_OVERVIEW**: Discover README → entry points → dependencies → routes → models
-- **CROSS_CUTTING_CONCERN**: Find config files → dependencies → middleware
-- **FEATURE_FLOW**: Symbol + text + semantic + relationships
-- **SYMBOL_LOOKUP**: Direct symbol search only
-
----
-
-### 2. **Query Analyzer Service** (`query_analyzer_service.py`)
-**Purpose**: LLM-powered query understanding and classification.
-
-**Key Methods**:
-- `analyze(query)`: Returns `QueryAnalysis` object
-
-**Output**:
-```python
-{
-    "intent": "Understand shopping cart implementation",
-    "question_type": "feature_flow",  # 8 types
-    "concepts": ["cart", "items", "checkout"],
-    "symbol_queries": ["Cart", "CartItem", "addToCart"],
-    "text_queries": ["shopping cart", "add to cart"],
-    "import_queries": ["cart", "cart_service"]
-}
+```powershell
+uv pip install -r requirements.txt
 ```
 
-**Question Types**:
-1. **SYMBOL_LOOKUP**: "Where is X defined?"
-2. **CALL_SITE_LOOKUP**: "Where is X called?"
-3. **FILE_EXPLANATION**: "What does file.py do?"
-4. **FEATURE_FLOW**: "How does feature X work?"
-5. **ARCHITECTURAL_OVERVIEW**: "Explain the architecture"
-6. **END_TO_END_FLOW**: "Trace checkout from frontend to database"
-7. **CROSS_CUTTING_CONCERN**: "How is caching implemented?"
-8. **DEPENDENCY_ANALYSIS**: "What external services are used?"
+### 3. Configure Environment
 
----
-
-### 3. **Evidence Collector Service** (`evidence_collector_service.py`)
-**Purpose**: Merges results from multiple sources, deduplicates, and ranks evidence.
-
-**Key Methods**:
-- `collect(retrieval_results, max_evidence, question_type)`: Main collection
-- `_merge_candidates()`: Deduplicates overlapping evidence
-- `_candidate_key()`: Groups evidence by location
-- `_combined_score()`: Rewards agreement between sources
-- `_get_architectural_bonus()`: Awards bonuses for important files
-
-**Scoring System**:
-```python
-TYPE_BASE_SCORES = {
-    "source_context": 1.00,   # Actual source code
-    "symbol": 0.98,            # Exact symbol match
-    "text_match": 0.82,        # Text grep match
-    "import": 0.68,            # Import statement
-    "relationship": 0.66,      # Call graph entry
-    "semantic": 0.35,          # Vector similarity
-}
-
-ARCHITECTURAL_BONUSES = {
-    "readme": +0.30,
-    "entry_point": +0.25,
-    "routes": +0.20,
-    "models": +0.15,
-    "configuration": +0.15,
-    "dependency": +0.10,
-}
-```
-
-**Deduplication Strategy**:
-- Groups by file path + line range
-- Merges symbol + source_context for same location
-- Awards corroboration bonus when multiple methods find same code
-
----
-
-### 4. **Architectural File Service** (`architectural_file_service.py`)
-**Purpose**: Discovers key architectural files without full repository scan.
-
-**Key Methods**:
-- `discover_key_files(db, repository_id)`: Returns categorized files
-- `get_file_category(file_path)`: Classifies file type
-
-**Discovery Categories**:
-- **README**: Root README.md prioritized
-- **Entry Points**: main.py, manage.py, index.ts, app.py
-- **Dependencies**: requirements.txt, package.json, pom.xml
-- **Configuration**: settings.py, config.py, .env.example
-- **Routes**: urls.py, routes.ts, router.js
-- **Models**: models.py, schema.py, entities.ts
-
-**Language-Aware Patterns**:
-- Python: manage.py, settings.py, models.py, urls.py
-- JavaScript/TypeScript: index.ts, app.ts, routes.ts
-- Java: Application.java, pom.xml
-- Go: main.go, go.mod
-
----
-
-### 5. **Code Search Service** (`code_search_service.py`)
-**Purpose**: Symbol search across indexed code symbols.
-
-**Key Methods**:
-- `search(db, repository_id, query)`: Fuzzy symbol matching
-
-**Indexed Symbols**:
-- Functions, classes, methods, variables, constants
-- Qualified names (e.g., `MyClass.method`)
-- Language-aware parsing via Tree-sitter
-
-**Search Strategy**:
-- Exact matches first
-- Prefix matches second
-- Contains matches third
-- Case-insensitive fuzzy matching
-
-**Output**:
-```python
-{
-    "id": 123,
-    "name": "addToCart",
-    "symbol_type": "method",
-    "qualified_name": "CartService.addToCart",
-    "file": "services/cart.py",
-    "language": "python",
-    "start_line": 45,
-    "end_line": 67,
-    "signature": "def addToCart(self, item_id, quantity):"
-}
-```
-
----
-
-### 6. **Repository Search Service** (`repository_search_service.py`)
-**Purpose**: Fast text search using ripgrep.
-
-**Key Methods**:
-- `search_text(repository_path, query)`: Full-text search
-
-**Features**:
-- Uses ripgrep for high-speed search
-- Respects .gitignore
-- Returns file path, line number, matched text
-- Case-insensitive by default
-
-**Output**:
-```python
-{
-    "file": "backend/views.py",
-    "line": 128,
-    "text": "def checkout_cart(request):"
-}
-```
-
----
-
-### 7. **Semantic Search Service** (`semantic_search_service.py`)
-**Purpose**: Vector similarity search over code chunks.
-
-**Key Methods**:
-- `search(db, repository_id, query, limit)`: Semantic matching
-
-**Process**:
-1. Embed query with sentence-transformers
-2. Search Qdrant vector database
-3. Return top-K similar chunks
-4. Include similarity scores
-
-**Chunking Strategy**:
-- Symbol-aware chunking (whole functions/classes)
-- Context-preserving splits
-- 200-500 tokens per chunk
-- Overlap for continuity
-
-**Output**:
-```python
-{
-    "score": 0.87,
-    "chunk_id": 456,
-    "file": "cart/cart.py",
-    "symbol": "CartManager",
-    "symbol_type": "class",
-    "start_line": 15,
-    "end_line": 120,
-    "content": "class CartManager:\n    def add_item..."
-}
-```
-
----
-
-### 8. **Code Relationship Service** (`code_relationship_service.py`)
-**Purpose**: Queries call-graph relationships.
-
-**Key Methods**:
-- `get_calls(db, repository_id, symbol_name)`: Get what a symbol calls
-- `get_callers(db, repository_id, symbol_name)`: Get who calls a symbol
-
-**Database Schema**:
-```python
-CodeCall:
-    caller: str          # Calling function/method
-    caller_file: str     # Source file
-    caller_line: int     # Line number
-    called_name: str     # Called function
-```
-
-**Use Cases**:
-- Feature flow tracing: "What does checkout call?"
-- Impact analysis: "What calls authenticate()?"
-- Dependency tracking: "What uses Database.query?"
-
----
-
-### 9. **Code Indexer** (`code_indexer.py`)
-**Purpose**: Parses code and extracts symbols, imports, and relationships.
-
-**Key Methods**:
-- `index_repository(db, repository_id, local_path)`: Full indexing
-
-**Process**:
-1. Scan repository for code files
-2. Parse with Tree-sitter (language-aware AST)
-3. Extract:
-   - Functions, classes, methods
-   - Import statements
-   - Function calls (call graph)
-4. Store in SQLite database
-
-**Supported Languages**:
-- Python, JavaScript, TypeScript, Java, Go, C++, Ruby
-
----
-
-### 10. **LLM Service** (`llm_service.py`)
-**Purpose**: Groq API interface for query analysis.
-
-**Key Methods**:
-- `analyze_query(query)`: Send query to LLM for structured analysis
-
-**Configuration**:
-- Model: `llama-3.3-70b-versatile` (fast, high quality)
-- Temperature: 0.0 (deterministic)
-- JSON mode: Structured output
-- Timeout: 30 seconds
-
----
-
-## 🌐 API Endpoints
-
-### 1. **POST `/repositories`**
-**Purpose**: Add a repository to the system.
-
-**Request**:
-```json
-{
-    "repository_url": "https://github.com/user/repo"
-}
-```
-
-**Response**:
-```json
-{
-    "id": 1,
-    "name": "repo",
-    "url": "https://github.com/user/repo",
-    "status": "cloned",
-    "local_path": "/tmp/repo_xyz/repository"
-}
-```
-
-**Process**:
-1. Clone repository
-2. Create database record
-3. Return repository metadata
-
----
-
-### 2. **POST `/repositories/{id}/index`**
-**Purpose**: Parse and index repository code.
-
-**Response**:
-```json
-{
-    "repository_id": 1,
-    "files_indexed": 138,
-    "symbols_indexed": 618,
-    "imports_indexed": 245,
-    "relationships_indexed": 623
-}
-```
-
-**Process**:
-1. Scan repository for code files
-2. Parse with Tree-sitter
-3. Extract symbols, imports, calls
-4. Store in database
-
-**Duration**: ~30 seconds for medium repo
-
----
-
-### 3. **POST `/repositories/{id}/chunks`**
-**Purpose**: Create semantic chunks for vector search.
-
-**Response**:
-```json
-{
-    "repository_id": 1,
-    "chunks_created": 670
-}
-```
-
-**Process**:
-1. Read indexed code files
-2. Split into symbol-aware chunks
-3. Store with metadata (file, symbol, lines)
-
----
-
-### 4. **POST `/repositories/{id}/vector-index`**
-**Purpose**: Generate embeddings and index in Qdrant.
-
-**Response**:
-```json
-{
-    "repository_id": 1,
-    "chunks_indexed": 670,
-    "collection": "repository_code"
-}
-```
-
-**Process**:
-1. Load chunks from database
-2. Generate embeddings (sentence-transformers)
-3. Index in Qdrant vector database
-
-**Duration**: ~2-3 minutes for medium repo
-
----
-
-### 5. **GET `/repositories/{id}/retrieve`** 🔥 **MAIN ENDPOINT**
-**Purpose**: Intelligent code retrieval with multi-source fusion.
-
-**Request**:
-```
-GET /repositories/1/retrieve?query=How does the shopping cart work?&limit=10
-```
-
-**Response**:
-```json
-{
-    "query": "How does the shopping cart work?",
-    "repository": {
-        "id": 1,
-        "name": "Crumbs",
-        "url": "https://github.com/user/repo"
-    },
-    "query_analysis": {
-        "intent": "Understand shopping cart feature implementation",
-        "question_type": "feature_flow",
-        "concepts": ["shopping", "cart", "items"],
-        "symbol_queries": ["Cart", "CartItem", "addToCart"],
-        "text_queries": ["shopping cart", "cart service"],
-        "import_queries": ["cart"]
-    },
-    "evidence": [
-        {
-            "file": "frontend/cart.ts",
-            "language": "typescript",
-            "symbol": "Cart",
-            "symbol_type": "class",
-            "start_line": 15,
-            "end_line": 116,
-            "snippet": "export class Cart {\n  items: CartItem[] = [];\n  ...",
-            "relevance_score": 1.15,
-            "types": ["symbol", "source_context"],
-            "exact_match": true
-        }
-    ],
-    "raw_results": {
-        "symbols": [...],
-        "text_matches": [...],
-        "semantic": [...],
-        "relationships": [...],
-        "architectural_files": [...]
-    },
-    "summary": {
-        "symbol_matches": 43,
-        "text_matches": 4,
-        "semantic_matches": 10,
-        "source_contexts": 10,
-        "relationships": 0,
-        "architectural_files": 0,
-        "evidence_selected": 12,
-        "execution_time_seconds": 7.12
-    },
-    "metadata": {
-        "version": "1.0",
-        "timestamp": 1234567890,
-        "relationships_enabled": true
-    }
-}
-```
-
-**Process**:
-1. **Query Analysis**: LLM classifies question type
-2. **Routing**: Select appropriate strategy
-3. **Multi-Source Retrieval**:
-   - Symbol search for exact matches
-   - Text search for keywords
-   - Semantic search for conceptual similarity
-   - Relationship extraction for call graphs
-   - Architectural file discovery (if applicable)
-4. **Evidence Fusion**: Merge and deduplicate
-5. **Ranking**: Score by relevance, exact matches, architectural significance
-6. **Response**: Return top N evidence items
-
-**Query Parameters**:
-- `query` (required): Natural language question
-- `limit` (optional): Max semantic results (default: 10)
-
----
-
-### 6. **GET `/repositories/{id}/search`**
-**Purpose**: Direct symbol search (no semantic).
-
-**Request**:
-```
-GET /repositories/1/search?query=CartItem
-```
-
-**Response**:
-```json
-{
-    "query": "CartItem",
-    "results": [
-        {
-            "name": "CartItem",
-            "symbol_type": "class",
-            "file": "models.py",
-            "start_line": 45,
-            "end_line": 67
-        }
-    ]
-}
-```
-
----
-
-### 7. **GET `/repositories/{id}/search-text`**
-**Purpose**: Direct text search (ripgrep).
-
-**Request**:
-```
-GET /repositories/1/search-text?query=add_to_cart
-```
-
-**Response**:
-```json
-{
-    "query": "add_to_cart",
-    "results": [
-        {
-            "file": "views.py",
-            "line": 128,
-            "text": "def add_to_cart(request):"
-        }
-    ]
-}
-```
-
----
-
-### 8. **GET `/repositories/{id}/semantic-search`**
-**Purpose**: Direct semantic search (vector similarity).
-
-**Request**:
-```
-GET /repositories/1/semantic-search?query=checkout process&limit=5
-```
-
-**Response**:
-```json
-{
-    "repository_id": 1,
-    "query": "checkout process",
-    "results": [
-        {
-            "score": 0.87,
-            "file": "checkout.py",
-            "content": "def process_checkout(cart):\n    ..."
-        }
-    ],
-    "count": 5
-}
-```
-
----
-
-### 9. **GET `/repositories/{id}/relationships/calls`**
-**Purpose**: Get call graph for a symbol.
-
-**Request**:
-```
-GET /repositories/1/relationships/calls?symbol_name=checkout
-```
-
-**Response**:
-```json
-{
-    "symbol": "checkout",
-    "calls": [
-        {
-            "caller": "checkout",
-            "caller_file": "views.py",
-            "caller_line": 45,
-            "called_name": "validate_cart"
-        },
-        {
-            "caller": "checkout",
-            "caller_file": "views.py",
-            "caller_line": 48,
-            "called_name": "process_payment"
-        }
-    ]
-}
-```
-
----
-
-### 10. **GET `/repositories/{id}/source`**
-**Purpose**: Extract source code for specific lines.
-
-**Request**:
-```
-GET /repositories/1/source?file_path=cart.py&start_line=10&end_line=50
-```
-
-**Response**:
-```json
-{
-    "file": "cart.py",
-    "start_line": 10,
-    "end_line": 50,
-    "source": "class Cart:\n    def __init__(self):\n        ..."
-}
-```
-
----
-
-### 11. **GET `/query-analyze`**
-**Purpose**: Test query analysis without retrieval.
-
-**Request**:
-```
-GET /query-analyze?query=How does authentication work?
-```
-
-**Response**:
-```json
-{
-    "intent": "Understand authentication implementation",
-    "question_type": "cross_cutting_concern",
-    "concepts": ["authentication", "auth", "login"],
-    "symbol_queries": ["authenticate", "login", "JWT"],
-    "text_queries": ["authentication", "auth flow"],
-    "import_queries": ["auth", "jwt"]
-}
-```
-
----
-
-## 🔄 Complete Workflow Example
-
-### Scenario: "How does the shopping cart work?"
-
-**Step 1: Repository Setup**
-```bash
-# Clone and index repository
-POST /repositories {"repository_url": "..."}
-POST /repositories/1/index
-POST /repositories/1/chunks
-POST /repositories/1/vector-index
-```
-
-**Step 2: Query**
-```bash
-GET /repositories/1/retrieve?query=How does the shopping cart work?
-```
-
-**Step 3: Internal Process**
-
-1. **Query Analysis** (LLM):
-   ```python
-   {
-       "question_type": "feature_flow",
-       "symbol_queries": ["Cart", "CartItem", "addToCart"],
-       "text_queries": ["shopping cart", "cart service"],
-       "import_queries": ["cart"]
-   }
-   ```
-
-2. **Parallel Searches**:
-   - Symbol search: Finds `Cart`, `CartItem`, `CartService` classes
-   - Text search: Finds "shopping cart" in comments/docs
-   - Semantic search: Finds similar cart-related code
-
-3. **Source Extraction**:
-   - Retrieves actual source code for matched symbols
-   - Expands context (±10 lines for single-line matches)
-
-4. **Relationship Extraction**:
-   - Finds what `addToCart` calls
-   - Discovers `cart.add()`, `validate_item()`, etc.
-
-5. **Evidence Collection**:
-   - Merges symbol + source for same location
-   - Deduplicates overlapping evidence
-   - Ranks by relevance score
-
-6. **Response**:
-   ```json
-   {
-       "evidence": [
-           {
-               "file": "cart.ts",
-               "symbol": "Cart",
-               "snippet": "export class Cart {...}",
-               "relevance_score": 1.15,
-               "types": ["symbol", "source_context", "semantic"]
-           }
-       ]
-   }
-   ```
-
----
-
-## 🧪 Testing
-
-### Manual Testing
+Copy `.env.example` to `.env` and fill in values:
 
 ```bash
-# Start server
-.\start_server.ps1
+APP_ENV=development
 
-# Test architectural question
-curl "http://localhost:8000/repositories/1/retrieve?query=Explain this project"
+DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/ai_opensource_investigator
 
-# Test feature flow
-curl "http://localhost:8000/repositories/1/retrieve?query=How does authentication work?"
-
-# Test symbol lookup
-curl "http://localhost:8000/repositories/1/retrieve?query=Where is CartItemAdmin defined?"
-```
-
-### Database Inspection
-
-```bash
-# View indexed data
-python check_data.py
-
-# View relationships
-python check_relationships.py
-
-# Check Redis
-python check_redis.py
-```
-
----
-
-## 📊 Performance Characteristics
-
-### Retrieval Performance
-
-| Query Type | Execution Time | Evidence Quality |
-|------------|---------------|------------------|
-| Symbol Lookup | 2-4s | Exact matches |
-| Feature Flow | 5-8s | Comprehensive |
-| Architectural Overview | 6-10s | High-level view |
-| Cross-Cutting Concern | 4-6s | Config + code |
-
-### Scaling
-
-- **Small Repo** (<100 files): <5s retrieval
-- **Medium Repo** (100-500 files): 5-10s retrieval
-- **Large Repo** (>500 files): 10-20s retrieval
-
-### Database Sizes
-
-- SQLite: ~50MB for 500 files
-- Qdrant: ~200MB for 1000 chunks
-- Total: ~250MB per medium repository
-
----
-
-## 🛠️ Configuration
-
-### Environment Variables (`.env`)
-
-```bash
-# Database
-DATABASE_URL=sqlite:///./repository_data.db
-
-# Qdrant Vector Database
-QDRANT_PATH=./data/qdrant
-
-# Groq API (for query analysis)
 GROQ_API_KEY=your_groq_api_key_here
 QUERY_ANALYZER_MODEL=llama-3.3-70b-versatile
-
-# Embedding Model
-EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-EMBEDDING_DIMENSION=384
-
-# Application
-APP_NAME=AI Open-Source Project Investigator
-DEBUG=False
 ```
 
-### Model Configuration
+> Qdrant runs in local file mode — no server needed. Data is stored in `data/qdrant/`.
 
-**Query Analyzer**: `llama-3.3-70b-versatile`
-- Purpose: Question classification and query decomposition
-- Speed: ~1-2 seconds per query
-- Quality: High accuracy for technical questions
-
-**Embedding Model**: `all-MiniLM-L6-v2`
-- Purpose: Semantic similarity
-- Dimension: 384
-- Speed: ~50ms per query
-
----
-
-## 🚀 Deployment
-
-### Development
+### 4. Set Up Database
 
 ```powershell
-# Start with auto-reload
+# Create the PostgreSQL database first, then:
+.venv\Scripts\alembic.exe upgrade head
+```
+
+### 5. Start the Server
+
+```powershell
+# Development (with auto-reload)
 .\start_server_dev.ps1
-```
 
-### Production
-
-```powershell
-# Start without auto-reload
+# Production
 .\start_server.ps1
 ```
 
-### Docker (Future)
+Server runs at `http://localhost:8000`. API docs at `http://localhost:8000/docs`.
+
+---
+
+## Indexing a Repository
+
+Run these four steps in order. Each step depends on the previous one.
 
 ```bash
-# Build
-docker build -t ai-investigator .
+# 1. Clone the repository
+POST /repositories
+Body: {"repository_url": "https://github.com/user/repo"}
 
-# Run
-docker run -p 8000:8000 -v ./data:/app/data ai-investigator
+# 2. Parse and index symbols
+POST /repositories/{id}/index
+
+# 3. Create semantic chunks
+POST /repositories/{id}/chunks
+
+# 4. Generate embeddings and index in Qdrant
+POST /repositories/{id}/vector-index
+```
+
+For a medium-sized repository (~150 files):
+- Steps 1–3: ~30 seconds
+- Step 4: ~60 seconds
+
+To re-index after a code change to the investigator itself:
+
+```powershell
+python backend/scripts/reindex.py --repo-id 1
+# Skip the slow embedding step if only symbol data changed:
+python backend/scripts/reindex.py --repo-id 1 --skip-vectors
 ```
 
 ---
 
-## 🐛 Troubleshooting
+## API Reference
 
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues.
+### Investigate Endpoints
 
-### Quick Fixes
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/repositories/{id}/investigate` | Single evidence-grounded investigation |
+| `POST` | `/repositories/{id}/investigate/bulk` | Up to 10 queries in one request |
 
-**Qdrant Lock Error**:
+**Single investigation:**
+```bash
+POST /repositories/1/investigate
+Body: {"query": "How does the checkout flow work?"}
+```
+
+**Bulk investigation:**
+```bash
+POST /repositories/1/investigate/bulk?delay_between_queries=3.0
+Body: [
+  "Trace the checkout flow end-to-end.",
+  "Explain how cart items are synchronized.",
+  "What are the Angular and Django versions?"
+]
+```
+
+Response includes per-query `stage_times` (retrieval, answer generation) and a summary with `avg_stage_times`.
+
+### Retrieval Endpoint
+
+```bash
+GET /repositories/{id}/retrieve?query=How does auth work?&semantic_limit=10
+```
+
+Returns raw ranked evidence — useful for debugging what the system finds before LLM answer generation.
+
+### Indexing Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/repositories` | Clone a repository |
+| `POST` | `/repositories/{id}/index` | Parse and index symbols |
+| `POST` | `/repositories/{id}/chunks` | Create semantic chunks |
+| `POST` | `/repositories/{id}/vector-index` | Embed chunks into Qdrant |
+
+### Search Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/repositories/{id}/search` | Symbol search |
+| `GET` | `/repositories/{id}/search-text` | Full-text search |
+| `GET` | `/repositories/{id}/semantic-search` | Vector similarity search |
+| `GET` | `/repositories/{id}/relationships/calls` | Call graph for a symbol |
+| `GET` | `/repositories/{id}/source` | Raw source extraction |
+| `GET` | `/query-analyze` | Test query classification |
+
+---
+
+## How Retrieval Works
+
+Every query goes through this pipeline:
+
+```
+User query
+    │
+    ▼
+Query Analyzer  ──── LLM classifies type + extracts search terms
+    │                 Falls back to deterministic extraction on LLM failure
+    │
+    ▼
+Question type router
+    │
+    ├─── DEPENDENCY_ANALYSIS / ARCHITECTURAL_OVERVIEW
+    │        └─► Staged: discover manifests + config files first
+    │
+    ├─── FEATURE_FLOW / END_TO_END_FLOW
+    │        └─► Standard + follow called functions (targeted flow retrieval)
+    │
+    └─── SYMBOL_LOOKUP / all others
+             └─► Standard search only
+    │
+    ▼
+Parallel searches
+    ├── Symbol DB search  (exact + fuzzy identifier matching)
+    ├── Full-text search  (grep across all repository files)
+    ├── Import search     (module/package references)
+    └── Semantic search   (Qdrant vector similarity)
+    │
+    ▼
+Evidence Collector
+    ├── Merge architectural files into candidate pool
+    ├── Deduplicate by file + line range
+    ├── Score each candidate (base score by source type)
+    ├── Apply architectural bonuses (manifests, config, README)
+    └── Select top 12 evidence items
+    │
+    ▼
+Answer Generation (LLM)
+    └── Evidence-grounded answer with inline citations
+```
+
+### Question Types
+
+| Type | Example | Strategy |
+|---|---|---|
+| `symbol_lookup` | "Where is CartSyncView defined?" | Symbol search only |
+| `call_site_lookup` | "Where is addToCart called?" | Symbol + relationships |
+| `file_explanation` | "What does views.py do?" | Source + semantic |
+| `feature_flow` | "How does checkout work?" | All sources + follow calls |
+| `architectural_overview` | "Explain this project" | Staged architectural files |
+| `end_to_end_flow` | "Trace a request frontend to DB" | All sources + follow calls |
+| `cross_cutting_concern` | "How is caching implemented?" | Config + all sources |
+| `dependency_analysis` | "What Angular version is used?" | Manifests first |
+
+### Evidence Scoring
+
+```
+Base scores:
+  source_context  → 1.00   actual retrieved source
+  symbol          → 0.98   exact symbol match
+  text_match      → 0.82   grep match
+  import          → 0.68   import statement
+  relationship    → 0.66   call graph entry
+  semantic        → 0.35–0.70  vector similarity
+
+Architectural bonuses (added on top):
+  package manifests   → +0.45  (dependency questions)
+  README              → +0.30  (architectural questions)
+  entry points        → +0.25
+  routes files        → +0.20
+  models/config       → +0.15
+```
+
+---
+
+## Evidence-Grounded Answers
+
+The `investigate` endpoints generate answers using an LLM constrained to the retrieved evidence. The system:
+
+- Cites every claim with evidence IDs (E1, E2, …)
+- Refuses to invent code, functions, or side effects not in evidence
+- Distinguishes confirmed code from docstring intentions
+- Reports `confidence: high / partial / insufficient`
+- Lists specific limitations when evidence is incomplete
+
+### Answer Schema
+
+```json
+{
+  "question": "...",
+  "answer": "CartSyncView [E1] provides two endpoints...",
+  "citations": [
+    {
+      "evidence_id": "E1",
+      "file": "backend/accounts/views.py",
+      "start_line": 292,
+      "end_line": 331,
+      "symbol": "CartSyncView",
+      "snippet": "class CartSyncView(APIView):\n    ...",
+      "relevance": "Defines the class being described"
+    }
+  ],
+  "confidence": "partial",
+  "limitations": [
+    "POST method body is truncated after the for-loop start"
+  ],
+  "execution_time_seconds": 26.2
+}
+```
+
+---
+
+## Query Analysis with Fallback
+
+The query analyzer uses a compact JSON schema (not the full Pydantic `$defs` output) to stay well within the LLM token budget. On any LLM failure, a deterministic fallback activates:
+
+- Extracts CamelCase/snake_case identifiers → `symbol_queries`
+- Strips stopwords → `text_queries`
+- Classifies type from keywords (no LLM needed)
+- Investigation continues — never aborts on query analysis failure
+
+Responses marked `[FALLBACK]` in bulk results indicate the LLM was unavailable for that query.
+
+---
+
+## Supported File Types
+
+The indexer parses and indexes these file types for symbols:
+
+| Extension | Language | Symbol Extraction |
+|---|---|---|
+| `.py` | Python | AST (full: functions, classes, decorators, calls) |
+| `.ts`, `.tsx` | TypeScript | Tree-sitter |
+| `.js`, `.jsx` | JavaScript | Tree-sitter |
+| `.java` | Java | Tree-sitter |
+| `.go` | Go | Tree-sitter |
+| `.cs` | C# | Tree-sitter |
+| `.cpp`, `.cc`, `.c` | C/C++ | Tree-sitter |
+| `.rs` | Rust | Tree-sitter |
+| `.php` | PHP | Tree-sitter |
+| `.rb` | Ruby | Tree-sitter |
+
+These file types are indexed for content but have no symbol extraction (full-text and semantic search still work):
+
+| Extension | Type |
+|---|---|
+| `.json` | Dependency manifests (package.json, etc.) |
+| `.txt` | Plain text (requirements.txt, etc.) |
+| `.toml` | Config (pyproject.toml, etc.) |
+| `.yaml`, `.yml` | Config files |
+
+**Excluded automatically:** `node_modules/`, `.venv/`, `dist/`, `build/`, lock files (`package-lock.json`, `yarn.lock`), compiled files (`.pyc`, `.min.js`), binary files, files over 1 MB.
+
+---
+
+## Database Migrations
+
+This project uses Alembic for schema migrations.
+
+```powershell
+# Check current migration version
+.venv\Scripts\alembic.exe current
+
+# Apply all pending migrations (fresh install or after schema change)
+.venv\Scripts\alembic.exe upgrade head
+
+# Check if DB matches models (should say "No new upgrade operations")
+.venv\Scripts\alembic.exe check
+
+# Create a new migration after changing a model
+.venv\Scripts\alembic.exe revision --autogenerate -m "Add column X to table Y"
+
+# Or use the helper script
+.\backend\scripts\create_migration.ps1 "Add column X to table Y"
+
+# Verify schema matches models
+python backend\scripts\verify_schema.py
+```
+
+### Migration History
+
+| Revision | Description |
+|---|---|
+| `577189d69fe0` | Initial migration — all models |
+| `aeb8eee804c4` | Add `updated_at` to repositories, index on `url` |
+
+---
+
+## Testing
+
+### Run All Tests
+
+```powershell
+python -m pytest backend/tests/ -v
+```
+
+96 tests, ~4 seconds.
+
+### Test Coverage
+
+| Test File | Count | Covers |
+|---|---|---|
+| `test_query_analyzer_service.py` | 25 | LLM responses, truncation, fallback, retry |
+| `test_service_units.py` | 40 | Language detection, file filtering, retrieval, evidence ranking |
+| `test_evidence_grounding.py` | 16 | Evidence validation, prompt guidance, citations |
+| `test_llm_service.py` | 15 | Groq client, model modes, error handling |
+
+### Regression Benchmark
+
+Runs the same 10 queries against an indexed repository and reports success rate, confidence, citation count, and per-stage timing:
+
+```powershell
+# Server must be running
+python backend/scripts/run_regression.py --delay 3.0
+```
+
+**Baseline results (Crumbs repository, 10 queries):**
+
+| Metric | Result |
+|---|---|
+| Successful | 10/10 |
+| Failed | 0 |
+| Rate limit hit | No |
+| Total time | ~207s |
+| Avg retrieval | 3.8s |
+| Avg answer generation | 14.1s |
+
+---
+
+## Utilities
+
+```powershell
+# Inspect indexed database stats
+python check_data.py
+
+# Inspect call graph relationships
+python check_relationships.py
+
+# Re-index a repository after investigator code changes
+python backend/scripts/reindex.py --repo-id 1
+
+# Skip slow vector re-embedding (use after symbol-only changes)
+python backend/scripts/reindex.py --repo-id 1 --skip-vectors
+```
+
+---
+
+## Configuration Reference
+
+### `.env` Variables
+
+```bash
+# Required
+DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/dbname
+GROQ_API_KEY=your_groq_api_key
+
+# Optional — defaults shown
+APP_ENV=development
+APP_NAME=AI Open-Source Project Investigator
+QUERY_ANALYZER_MODEL=llama-3.3-70b-versatile
+
+# Not required (Qdrant runs in local file mode)
+# VECTOR_DB_URL=
+# VECTOR_DB_API_KEY=
+```
+
+### Groq Model Selection
+
+The system is tested with these models on Groq:
+
+| Model | Structured output | Notes |
+|---|---|---|
+| `llama-3.3-70b-versatile` | json_object | Recommended default |
+| `qwen/qwen3.8-27b` | json_schema | Full schema support |
+| `openai/gpt-oss-20b` | json_object | Faster, less accurate |
+| `openai/gpt-oss-120b` | prompt injection only | Use only if others unavailable |
+
+Change model with `QUERY_ANALYZER_MODEL=model-name` in `.env`.
+
+---
+
+## Known Limitations
+
+1. **Short symbol bodies may be truncated** — when a class body spans many lines, the LLM answer-generation token budget may cut off the explanation before the full method body.
+
+2. **Database-config questions** — queries phrased broadly ("explain the db config") are sometimes classified as `feature_flow` rather than `cross_cutting_concern`, so `settings.py` may not receive its full architectural bonus. Rephrase as *"How is the database configured in settings.py?"* for best results.
+
+3. **Absence claims** — when a symbol is not found, the system reports coverage limitations rather than asserting repository-wide absence, since some file types or dynamically generated code may not be indexed.
+
+4. **Rate limits** — Groq free tier: 200k tokens/day. Each investigation query costs ~2,000–8,000 tokens. Use `delay_between_queries=3.0` in bulk requests to stay within rate limits.
+
+---
+
+## Troubleshooting
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for a full list.
+
+**Qdrant lock error** — another process (or the server) holds the file lock:
 ```powershell
 .\stop_server.ps1
 ```
 
-**Empty Results**:
-```bash
-# Re-index repository
-POST /repositories/{id}/index
-POST /repositories/{id}/vector-index
+**Empty evidence** — repository not yet indexed or index is stale:
+```powershell
+python backend/scripts/reindex.py --repo-id 1
 ```
 
-**Slow Queries**:
-- Reduce `limit` parameter
-- Check database size with `python check_data.py`
+**Query analysis failures** — the system falls back to deterministic extraction and continues. Check server logs for `[fallback]` markers.
+
+**Rate limit hit** — bulk endpoint automatically skips remaining queries and reports `rate_limit_hit: true`. Wait for quota reset (Groq resets daily) or reduce batch size.
 
 ---
 
-## 📈 Future Enhancements
+## Acknowledgements
 
-### Planned Features
-
-1. **Better Relationship Extraction**
-   - Extract from merged evidence, not just initial symbol results
-   - Support transitive call chains
-
-2. **Improved Deduplication**
-   - Handle overlapping line ranges (>50% overlap)
-   - Smart merging for similar but not identical matches
-
-3. **Query Refinement**
-   - Interactive follow-up questions
-   - Query suggestions based on repository
-
-4. **Multi-Repository Search**
-   - Cross-repository symbol search
-   - Dependency analysis across repos
-
-5. **Frontend UI**
-   - Visual code navigation
-   - Interactive relationship graphs
-   - Side-by-side evidence comparison
-
----
-
-## 🤝 Contributing
-
-### Code Style
-
-- Python: PEP 8, type hints
-- Line length: 80 characters
-- Docstrings: Google style
-
-### Testing
-
-```bash
-# Run tests
-pytest tests/
-
-# Check coverage
-pytest --cov=backend tests/
-```
-
----
-
-## 📝 License
-
-[Your License Here]
-
----
-
-## 📧 Contact
-
-[Your Contact Information]
-
----
-
-## 🙏 Acknowledgments
-
-- **Tree-sitter**: AST parsing
-- **Qdrant**: Vector database
-- **Groq**: LLM API
-- **FastAPI**: Web framework
-- **sentence-transformers**: Embeddings
-- **ripgrep**: Fast text search
-
----
-
-**Built with ❤️ for developers who need to understand code fast.**
+- [Tree-sitter](https://tree-sitter.github.io/) — incremental parsing
+- [Qdrant](https://qdrant.tech/) — vector database
+- [Groq](https://groq.com/) — LLM inference
+- [FastAPI](https://fastapi.tiangolo.com/) — web framework
+- [sentence-transformers](https://sbert.net/) — embeddings
+- [SQLAlchemy](https://sqlalchemy.org/) + [Alembic](https://alembic.sqlalchemy.org/) — ORM and migrations

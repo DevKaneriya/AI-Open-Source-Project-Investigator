@@ -4,6 +4,7 @@ python-dotenv
 pydantic-settings
 GitPython
 SQLAlchemy
+alembic
 psycopg[binary]
 tree-sitter
 tree-sitter-language-pack

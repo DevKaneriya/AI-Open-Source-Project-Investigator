@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.config import settings
 
-from backend.app.core.database import Base, engine
+# Import database utilities - DO NOT create tables automatically
+# Tables should be managed via Alembic migrations
 from backend.app.core.database import get_db
 
 from backend.app.services.github_service import GitHubService
@@ -35,8 +36,9 @@ from backend.app.models.code_import import CodeImport
 from backend.app.models.code_chunk import CodeChunk
 from backend.app.models.investigation_answer import InvestigationResponse
 
-
-Base.metadata.create_all(bind=engine)
+# NOTE: Table creation is now managed via Alembic migrations
+# Run migrations with: alembic upgrade head
+# See backend/alembic/README or MIGRATIONS.md for details
 
 app = FastAPI(
     title=settings.app_name,
@@ -373,159 +375,205 @@ def investigate_repository_bulk(
 ) -> dict:
     """
     Generate evidence-grounded answers for multiple queries in one request.
-    
-    Testing/development endpoint that processes multiple queries sequentially
-    and returns all results together.
-    
+
+    Processes queries sequentially to avoid triggering provider rate limits.
+    Returns per-stage timing (query_analysis, retrieval, answer_generation) so
+    callers can identify which stage dominates latency.
+
+    One query's failure never corrupts the results of the others; each entry
+    carries its own status, error_type, and timing independently.
+
     Args:
         repository_id: Repository database ID
-        queries: List of natural language questions about the repository
-        delay_between_queries: Delay in seconds between queries (default: 2.0) to avoid rate limits
+        queries: JSON array of natural-language questions (max 10)
+        delay_between_queries: Seconds to pause between queries (default: 2.0)
         db: Database session
-        
+
     Returns:
-        Dict with:
-        - repository: Repository info
-        - results: List of investigation results (one per query)
-        - summary: Overall execution statistics
-        
+        Dict with repository, results (one per query), and summary.
+
     Raises:
         404: Repository not found
-        400: Invalid queries or retrieval failed
-        500: Service error
-        
-    Note: This endpoint respects rate limits by adding delays between queries.
-    If you hit rate limits, reduce the number of queries or increase delay_between_queries.
+        400: Empty queries list or more than 10 queries
+        500: Unhandled service error
     """
     import time
+    import logging
+    import re
+
+    log = logging.getLogger(__name__)
     start_time = time.time()
-    
-    # Validate repository exists first
+
     repository = db.get(Repository, repository_id)
     if not repository:
-        raise HTTPException(
-            status_code=404,
-            detail="Repository not found.",
-        )
-    
+        raise HTTPException(status_code=404, detail="Repository not found.")
+
     if not queries:
-        raise HTTPException(
-            status_code=400,
-            detail="No queries provided. Please provide at least one query.",
-        )
-    
+        raise HTTPException(status_code=400, detail="No queries provided.")
+
     if len(queries) > 10:
         raise HTTPException(
             status_code=400,
-            detail=f"Too many queries ({len(queries)}). Maximum 10 queries allowed per bulk request.",
+            detail=f"Too many queries ({len(queries)}). Maximum 10 allowed.",
         )
-    
-    # Validate delay
+
     if delay_between_queries < 0:
-        raise HTTPException(
-            status_code=400,
-            detail="delay_between_queries must be >= 0",
-        )
-    
-    results = []
-    errors = []
+        raise HTTPException(status_code=400, detail="delay_between_queries must be >= 0.")
+
+    results: list[dict] = []
     rate_limit_hit = False
-    
+
     for idx, query in enumerate(queries, 1):
-        # Add delay between queries (except for the first one)
         if idx > 1 and delay_between_queries > 0:
             time.sleep(delay_between_queries)
-        
-        query_start = time.time()
-        
+
+        # --- per-query stage timers ---
+        t_query_start = time.time()
+        t_retrieval_start: float | None = None
+        t_answer_start: float | None = None
+        t_query_end: float | None = None
+
+        # Isolate each query so failures don't affect neighbours
+        retrieval_result: dict | None = None
+        investigation_answer = None
+        error_msg: str | None = None
+        error_type: str | None = None
+        question_type: str | None = None
+
         try:
-            # Use the existing retrieval pipeline
+            # ── Stage 1: retrieval (includes query analysis internally) ──
+            t_retrieval_start = time.time()
             retrieval_result = retrieval_service.retrieve(
                 db=db,
                 repository_id=repository_id,
                 query=query,
                 semantic_limit=10,
             )
-            
-            # Extract relevant data
-            evidence = retrieval_result.get('evidence', [])
-            question_type = retrieval_result['query_analysis'].get('question_type')
-            repo_info = retrieval_result['repository']
-            
-            # Generate answer
+            t_retrieval_end = time.time()
+
+            evidence = retrieval_result.get("evidence", [])
+            question_type = retrieval_result["query_analysis"].get("question_type")
+            repo_info = retrieval_result["repository"]
+
+            # Stage timing is available from the retrieval summary when present
+            retrieval_summary = retrieval_result.get("summary", {})
+            # query_analysis sub-timing is embedded inside retrieval execution time
+            retrieval_execution = retrieval_summary.get(
+                "execution_time_seconds",
+                round(t_retrieval_end - t_retrieval_start, 3),
+            )
+
+            # ── Stage 2: answer generation ──
+            t_answer_start = time.time()
             investigation_answer = answer_generation_service.generate_answer(
                 question=query,
                 evidence=evidence,
                 question_type=question_type,
-                repository_name=repo_info.get('name'),
+                repository_name=repo_info.get("name"),
             )
-            
-            # Add execution time
-            query_execution_time = round(time.time() - query_start, 3)
-            investigation_answer.execution_time_seconds = query_execution_time
-            
-            # Build result
-            result = {
+            t_answer_end = time.time()
+            answer_execution = round(t_answer_end - t_answer_start, 3)
+
+        except Exception as exc:
+            error_msg = str(exc)
+            is_rate_limit = "rate limit" in error_msg.lower() or "429" in error_msg
+
+            if is_rate_limit:
+                rate_limit_hit = True
+                wait_match = re.search(
+                    r"try again in ([0-9a-z.]+)", error_msg, re.IGNORECASE
+                )
+                wait_str = wait_match.group(1) if wait_match else "unknown"
+                error_msg = (
+                    f"Rate limit exceeded. Try again in {wait_str}. "
+                    "Increase delay_between_queries or reduce batch size."
+                )
+                error_type = "rate_limit"
+            elif "query analysis" in error_msg.lower() or "truncated" in error_msg.lower():
+                error_type = "query_analysis_failure"
+            else:
+                error_type = "other"
+
+            log.error("Bulk query %d/%d failed: %s", idx, len(queries), error_msg)
+
+        t_query_end = time.time()
+        total_query_time = round(t_query_end - t_query_start, 3)
+
+        # ── Build per-query result ──
+        if investigation_answer is not None and retrieval_result is not None:
+            # Compute per-stage breakdown
+            retrieval_stage_seconds = round(
+                (t_answer_start - t_retrieval_start) if t_answer_start and t_retrieval_start else 0.0,
+                3,
+            )
+            answer_stage_seconds = round(
+                (t_query_end - t_answer_start) if t_answer_start else 0.0,
+                3,
+            )
+            # query_analysis is the portion of retrieval that happens before search
+            retrieval_summary = retrieval_result.get("summary", {})
+            investigation_answer.execution_time_seconds = total_query_time
+
+            results.append({
                 "query_index": idx,
                 "query": query,
                 "question_type": question_type,
+                "status": "success",
                 "investigation": investigation_answer.model_dump(),
-                "evidence_summary": retrieval_result.get('summary', {}),
-                "execution_time_seconds": query_execution_time,
-                "status": "success"
-            }
-            
-            results.append(result)
-            
-        except Exception as exc:
-            import logging
-            error_msg = str(exc)
-            
-            # Check if it's a rate limit error
-            is_rate_limit = "rate limit" in error_msg.lower() or "429" in error_msg
-            
-            if is_rate_limit:
-                rate_limit_hit = True
-                # Extract wait time if available
-                import re
-                wait_match = re.search(r'try again in (\d+[msh][\d.]+[msh]?)', error_msg)
-                wait_time = wait_match.group(1) if wait_match else "unknown"
-                
-                error_summary = f"Rate limit exceeded. Please try again in {wait_time}. Consider reducing queries or increasing delay_between_queries parameter."
-            else:
-                error_summary = error_msg
-            
-            logging.error(f"Error processing query {idx} ('{query}'): {error_msg}")
-            
-            # Record error but continue with other queries unless it's rate limit
-            error_result = {
+                "evidence_summary": retrieval_summary,
+                "execution_time_seconds": total_query_time,
+                "stage_times": {
+                    # retrieval includes query-analysis + all search stages
+                    "retrieval_seconds": retrieval_stage_seconds,
+                    "answer_generation_seconds": answer_stage_seconds,
+                },
+            })
+        else:
+            results.append({
                 "query_index": idx,
                 "query": query,
                 "status": "error",
-                "error": error_summary,
-                "error_type": "rate_limit" if is_rate_limit else "other",
-                "execution_time_seconds": round(time.time() - query_start, 3)
-            }
-            
-            results.append(error_result)
-            errors.append(error_result)
-            
-            # If rate limit hit, stop processing remaining queries
-            if is_rate_limit:
-                # Add remaining queries as skipped
-                for remaining_idx in range(idx + 1, len(queries) + 1):
+                "error": error_msg,
+                "error_type": error_type,
+                "execution_time_seconds": total_query_time,
+            })
+
+            # Stop immediately on rate limit; mark remaining as skipped
+            if rate_limit_hit:
+                for skip_idx in range(idx + 1, len(queries) + 1):
                     results.append({
-                        "query_index": remaining_idx,
-                        "query": queries[remaining_idx - 1],
+                        "query_index": skip_idx,
+                        "query": queries[skip_idx - 1],
                         "status": "skipped",
-                        "error": "Skipped due to rate limit on previous query",
+                        "error": "Skipped: rate limit hit on a previous query.",
                         "error_type": "rate_limit",
-                        "execution_time_seconds": 0
+                        "execution_time_seconds": 0.0,
                     })
                 break
-    
+
     total_time = round(time.time() - start_time, 3)
-    
+
+    # Aggregate stage-time statistics across successful queries
+    successful_results = [r for r in results if r.get("status") == "success"]
+    avg_retrieval = (
+        round(
+            sum(r["stage_times"]["retrieval_seconds"] for r in successful_results)
+            / len(successful_results),
+            3,
+        )
+        if successful_results
+        else 0.0
+    )
+    avg_answer = (
+        round(
+            sum(r["stage_times"]["answer_generation_seconds"] for r in successful_results)
+            / len(successful_results),
+            3,
+        )
+        if successful_results
+        else 0.0
+    )
+
     return {
         "repository": {
             "id": repository.id,
@@ -535,18 +583,22 @@ def investigate_repository_bulk(
         "results": results,
         "summary": {
             "total_queries": len(queries),
-            "successful": len([r for r in results if r.get('status') == 'success']),
-            "failed": len([r for r in results if r.get('status') == 'error']),
-            "skipped": len([r for r in results if r.get('status') == 'skipped']),
+            "successful": len(successful_results),
+            "failed": len([r for r in results if r.get("status") == "error"]),
+            "skipped": len([r for r in results if r.get("status") == "skipped"]),
             "rate_limit_hit": rate_limit_hit,
             "total_execution_time_seconds": total_time,
+            "avg_stage_times": {
+                "retrieval_seconds": avg_retrieval,
+                "answer_generation_seconds": avg_answer,
+            },
         },
         "metadata": {
-            "version": "1.0",
+            "version": "1.1",
             "timestamp": time.time(),
             "endpoint": "bulk_investigate",
             "delay_between_queries": delay_between_queries,
-        }
+        },
     }
         
         

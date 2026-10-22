@@ -17,6 +17,16 @@ class LanguageService:
         ".rs": "rust",
         ".php": "php",
         ".rb": "ruby",
+        # Dependency manifests and plain-text config files.
+        # These have no parseable symbols, but the CodeIndexer will
+        # create a file record and CodeChunkService will use the
+        # fallback chunker so their content is embedded and searchable.
+        ".json": "json",
+        ".txt": "text",
+        ".toml": "toml",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".env": "text",
     }
 
     def detect(self, file_path: str) -> str | None:

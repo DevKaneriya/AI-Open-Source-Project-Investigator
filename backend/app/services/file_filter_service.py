@@ -38,6 +38,15 @@ EXCLUDED_NAMES = {
     ".env.local",
     ".env.production",
     "database_backup.json",
+    # Lock files are enormous and add noise without useful content for investigation.
+    # The declared-dependency versions in package.json / requirements.txt are sufficient.
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Pipfile.lock",
+    "Cargo.lock",
+    "go.sum",
     # Note: .env.example is NOT excluded - it contains configuration documentation
 }
 

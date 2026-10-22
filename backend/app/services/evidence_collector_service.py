@@ -69,6 +69,7 @@ class EvidenceCollectorService:
             semantic = results.get("semantic", []) if isinstance(results.get("semantic"), list) else []
             source_context = results.get("source_context", []) if isinstance(results.get("source_context"), list) else []
             relationships = results.get("relationships", []) if isinstance(results.get("relationships"), list) else []
+            architectural_files = results.get("architectural_files", []) if isinstance(results.get("architectural_files"), list) else []
 
             self._add_standard_candidates(
                 candidates,
@@ -113,6 +114,26 @@ class EvidenceCollectorService:
                 candidates,
                 relationships,
                 "relationship",
+                query_terms,
+                exact_identifiers,
+            )
+
+            # Architectural files are source contexts retrieved in a separate
+            # staged pass.  They must enter the candidate pool so the evidence
+            # collector can rank, deduplicate, and bonus them.
+            # The format from _staged_architectural_retrieval uses "source" as
+            # the content key; normalise to "content" here.
+            arch_normalised = []
+            for af in architectural_files:
+                norm = dict(af)
+                if "source" in norm and "content" not in norm:
+                    norm["content"] = norm["source"]
+                arch_normalised.append(norm)
+
+            self._add_standard_candidates(
+                candidates,
+                arch_normalised,
+                "source_context",   # treat as high-trust source context
                 query_terms,
                 exact_identifiers,
             )
@@ -762,14 +783,22 @@ class EvidenceCollectorService:
             if "models.py" in filename or "schema.py" in filename or "entities" in filename:
                 return self.ARCHITECTURAL_FILE_BONUSES["models"]
         
-        # Configuration valuable for cross-cutting concerns
-        if question_type in (QuestionType.CROSS_CUTTING_CONCERN, QuestionType.ARCHITECTURAL_OVERVIEW):
+        # Configuration valuable for cross-cutting concerns and db questions
+        if question_type in (QuestionType.CROSS_CUTTING_CONCERN, QuestionType.ARCHITECTURAL_OVERVIEW, QuestionType.FEATURE_FLOW):
             if any(name in filename for name in ["settings.py", "config.py", ".env.example", "configuration.py"]):
                 return self.ARCHITECTURAL_FILE_BONUSES["configuration"]
         
-        # Dependencies valuable for architectural overview
-        if question_type == QuestionType.ARCHITECTURAL_OVERVIEW:
-            if any(name in filename for name in ["requirements.txt", "package.json", "pyproject.toml", "gemfile"]):
+        # Dependency manifests: give a LARGE bonus for dependency_analysis so
+        # they always outrank documentation files that merely reference them.
+        _MANIFEST_NAMES = {
+            "package.json", "requirements.txt", "pyproject.toml",
+            "setup.py", "pipfile", "gemfile", "go.mod", "cargo.toml",
+            "pom.xml", "build.gradle",
+        }
+        if filename in _MANIFEST_NAMES:
+            if question_type == QuestionType.DEPENDENCY_ANALYSIS:
+                return 0.45   # Very high — must outrank docs
+            if question_type == QuestionType.ARCHITECTURAL_OVERVIEW:
                 return self.ARCHITECTURAL_FILE_BONUSES["dependency"]
         
         return 0.0

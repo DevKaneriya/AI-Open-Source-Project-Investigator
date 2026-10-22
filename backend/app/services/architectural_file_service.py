@@ -11,6 +11,7 @@ Uses database queries and pattern matching to find:
 - Database models
 """
 
+from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from backend.app.models.repository_file import RepositoryFile
@@ -35,8 +36,6 @@ class ArchitecturalFileService:
         "pyproject.toml",
         "setup.py",
         "package.json",
-        "package-lock.json",
-        "yarn.lock",
         "Gemfile",
         "go.mod",
         "pom.xml",
@@ -71,6 +70,7 @@ class ArchitecturalFileService:
         self,
         db: Session,
         repository_id: int,
+        repository_path: str | None = None,
     ) -> dict:
         """
         Discover key architectural files for a repository.
@@ -87,7 +87,7 @@ class ArchitecturalFileService:
         """
         all_files = self._get_all_files(db, repository_id)
         
-        return {
+        result = {
             "readme": self._find_readme_files(all_files),
             "entry_points": self._find_entry_points(all_files),
             "dependencies": self._find_dependencies(all_files),
@@ -95,6 +95,58 @@ class ArchitecturalFileService:
             "routes": self._find_routes(all_files),
             "models": self._find_models(all_files),
         }
+        
+        # If manifest files weren't indexed (e.g., before re-indexing with new
+        # LanguageService), locate them directly from the filesystem and create
+        # synthetic RepositoryFile-like objects so they can still be read.
+        if repository_path and not result["dependencies"]:
+            result["dependencies"] = self._discover_manifests_from_fs(
+                db, repository_id, repository_path
+            )
+        
+        return result
+
+    def _discover_manifests_from_fs(
+        self,
+        db: Session,
+        repository_id: int,
+        repository_path: str,
+    ) -> list[RepositoryFile]:
+        """
+        Look for dependency manifests directly on the filesystem when the
+        database index is missing them (happens before first re-index with
+        the updated LanguageService).
+        
+        Returns synthetic RepositoryFile objects with ``id=None`` so callers
+        can still read the path, but callers must handle ``id`` being None.
+        """
+        from backend.app.services.file_filter_service import should_include_file
+        
+        root = Path(repository_path)
+        found = []
+        
+        for pattern in self.DEPENDENCY_PATTERNS:
+            for match in root.rglob(pattern):
+                if not match.is_file():
+                    continue
+                if not should_include_file(root, match):
+                    continue
+                rel = str(match.relative_to(root))
+                # Use a plain namespace instead of an ORM-mapped object so we
+                # don't trigger SQLAlchemy instrumentation when id is set to None.
+                from types import SimpleNamespace
+                rf = SimpleNamespace(
+                    id=None,
+                    repository_id=repository_id,
+                    path=rel,
+                    language="text" if match.suffix in (".txt", "") else (
+                        "json" if match.suffix == ".json" else "text"
+                    ),
+                    file_size=match.stat().st_size,
+                )
+                found.append(rf)
+        
+        return found
     
     def discover_by_language(
         self,
@@ -307,3 +359,5 @@ class ArchitecturalFileService:
                 return "models"
         
         return None
+
+

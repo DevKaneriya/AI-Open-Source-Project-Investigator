@@ -21,8 +21,13 @@ logger = logging.getLogger(__name__)
 class AnswerGenerationService:
     """Generates evidence-grounded answers to technical repository questions."""
     
-    MAX_EVIDENCE_ITEMS = 15  # Limit evidence sent to LLM
-    MAX_SNIPPET_LENGTH = 500  # Max chars per code snippet
+    MAX_EVIDENCE_ITEMS = 10  # Limit evidence sent to LLM
+    # 1500 chars keeps most medium-sized functions whole (~375 tokens each).
+    # With 10 items that is ~3750 content tokens; add ~950 system + ~3000 output
+    # and the total stays comfortably inside an 8 192-token context window.
+    # 500 was too small: it cut CartSyncView (1 672 chars) before the POST
+    # body and CheckoutView (3 337 chars) before the order-creation logic.
+    MAX_SNIPPET_LENGTH = 2200  # Max chars per code snippet
     
     def __init__(self, llm_service: LLMService):
         self.llm_service = llm_service
@@ -60,7 +65,15 @@ class AnswerGenerationService:
         prepared_evidence = self._prepare_evidence(evidence)
         
         if not prepared_evidence:
-            return self._insufficient_evidence_response(question, "Retrieved evidence could not be prepared for analysis.")
+            # If this is a symbol lookup and evidence existed but all had 0-0 ranges /
+            # empty snippets, report as "not found" rather than a generic error.
+            if question_type == 'symbol_lookup':
+                return self._not_found_response(question)
+            return self._insufficient_evidence_response(
+                question,
+                "Retrieved evidence could not be prepared for analysis. "
+                "The referenced code may not have been indexed or is outside supported file types."
+            )
         
         # Determine token budget based on question type
         max_tokens = self._get_token_budget(question_type)
@@ -509,38 +522,47 @@ HANDLING GAPS:
     def _appears_truncated(self, answer: str) -> bool:
         """
         Detect if answer appears truncated mid-sentence.
-        
+
         Checks for common truncation indicators:
         - Ends without sentence-ending punctuation
         - Ends with incomplete code block
         - Ends with connector words
-        - Very short last sentence
         """
         if not answer:
             return False
-        
+
         answer = answer.rstrip()
-        
+
         # Check for incomplete code blocks
         if answer.count('```') % 2 != 0:
             logger.info("Detected unclosed code block - likely truncated")
             return True
-        
-        # Check if ends with sentence-ending punctuation
-        if answer and answer[-1] not in '.!?':
-            # Allow for code blocks ending with ```
+
+        # Valid terminal characters for technical writing.
+        # Colon is intentionally included: answers frequently end with a
+        # structured list or step sequence introduced by ':', e.g.
+        # "CartSyncView supports two operations:" which is NOT truncated.
+        VALID_ENDINGS = set('.!?:`')
+
+        if answer and answer[-1] not in VALID_ENDINGS:
+            # Allow answers ending with a closing code fence
             if not answer.endswith('```'):
                 logger.info(f"Answer ends without sentence punctuation: '{answer[-50:]}'")
                 return True
-        
+
         # Check for connector words at the end (suggests continuation)
         last_words = answer.split()[-3:] if answer.split() else []
-        continuation_words = {'and', 'or', 'but', 'so', 'then', 'also', 'additionally', 'however', 'therefore', 'thus', 'which', 'that', 'this', 'these', 'those', 'when', 'where', 'while', 'if', 'unless', 'because', 'since', 'as', 'for', 'with'}
-        
+        continuation_words = {
+            'and', 'or', 'but', 'so', 'then', 'also', 'additionally',
+            'however', 'therefore', 'thus', 'which', 'that', 'this',
+            'these', 'those', 'when', 'where', 'while', 'if', 'unless',
+            'because', 'since', 'as', 'for', 'with',
+        }
+
         if last_words and last_words[-1].lower().rstrip('.,;:') in continuation_words:
             logger.info(f"Answer ends with continuation word: {last_words[-1]}")
             return True
-        
+
         return False
     
     def _validate_citations(
@@ -654,4 +676,25 @@ HANDLING GAPS:
             citations=[],
             confidence='insufficient',
             limitations=[reason],
+        )
+
+    def _not_found_response(self, question: str) -> InvestigationAnswer:
+        """Create a clear 'symbol not found' response for symbol lookup queries."""
+        return InvestigationAnswer(
+            question=question,
+            answer=(
+                "The requested symbol was not found in the indexed source files. "
+                "This search covered all indexed symbols and file contents. "
+                "If the symbol exists in non-indexed files (e.g., generated code, "
+                "unsupported file types, or files excluded by the filter), "
+                "it would not appear in these results. "
+                "Based on the current index coverage, the symbol does not appear "
+                "to exist in the repository."
+            ),
+            citations=[],
+            confidence='insufficient',
+            limitations=[
+                "Symbol not found in any indexed source file.",
+                "Search coverage limited to indexed file types (Python, TypeScript, JavaScript, etc.).",
+            ],
         )

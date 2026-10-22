@@ -6,28 +6,27 @@
 
 **Error:**
 ```
-RuntimeError: Storage folder C:\...\data\qdrant is already accessed by another instance of Qdrant client.
+RuntimeError: Storage folder ...\data\qdrant is already accessed by another instance of Qdrant client.
 ```
 
 **Solution:**
 ```powershell
-# Run the stop script
 .\stop_server.ps1
-
-# Then start the server again
 .\start_server.ps1
 ```
 
-**Manual Fix:**
-1. Kill processes on port 8000:
-   ```powershell
-   Get-NetTCPConnection -LocalPort 8000 | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }
-   ```
+**Manual fix:**
+```powershell
+# Kill processes on port 8000
+Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    ForEach-Object { Stop-Process -Id $_ -Force }
 
-2. Remove lock file:
-   ```powershell
-   Remove-Item "data\qdrant\.lock" -Force
-   ```
+# Remove lock file
+Remove-Item "data\qdrant\.lock" -Force
+```
+
+---
 
 ### 2. Port 8000 Already in Use
 
@@ -38,15 +37,12 @@ ERROR: [Errno 10048] error while attempting to bind on address ('127.0.0.1', 800
 
 **Solution:**
 ```powershell
-# Run the stop script
 .\stop_server.ps1
-
-# Or manually kill the process
-$port = 8000
-Get-NetTCPConnection -LocalPort $port | Select-Object -ExpandProperty OwningProcess -Unique | Stop-Process -Force
 ```
 
-### 3. Module Not Found Errors
+---
+
+### 3. Module Not Found
 
 **Error:**
 ```
@@ -55,97 +51,139 @@ ModuleNotFoundError: No module named 'X'
 
 **Solution:**
 ```powershell
-# Activate virtual environment
-.venv\Scripts\activate
-
-# Reinstall dependencies
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
-### 4. GROQ_API_KEY Not Set
+---
+
+### 4. GROQ_API_KEY Not Configured
 
 **Error:**
 ```
-Configuration error: GROQ_API_KEY environment variable is not set
+RuntimeError: GROQ_API_KEY is not configured.
 ```
 
 **Solution:**
-1. Copy `.env.example` to `.env`:
-   ```powershell
-   Copy-Item .env.example .env
-   ```
+```powershell
+Copy-Item .env.example .env
+# Edit .env and add:  GROQ_API_KEY=your_key_here
+```
 
-2. Edit `.env` and add your GROQ API key:
-   ```
-   GROQ_API_KEY=your_key_here
-   ```
+---
 
-### 5. Database Not Found
+### 5. DATABASE_URL Not Configured
 
 **Error:**
 ```
-Repository not found
+RuntimeError: DATABASE_URL is not configured.
 ```
 
 **Solution:**
-```python
-# Check database
+Add to `.env`:
+```
+DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/ai_opensource_investigator
+```
+
+Then apply migrations:
+```powershell
+.venv\Scripts\alembic.exe upgrade head
+```
+
+---
+
+### 6. No Investigation Results (Empty Evidence)
+
+**Symptom:** Investigation returns `confidence: insufficient` with "No evidence was retrieved."
+
+**Cause:** Repository is not indexed or the index is stale.
+
+**Solution:**
+```powershell
+# Re-index (code symbols + chunks + vectors)
+python backend\scripts\reindex.py --repo-id 1
+
+# Or check what's indexed
+python check_data.py
+```
+
+---
+
+### 7. Rate Limit Hit
+
+**Error in bulk results:**
+```json
+"error_type": "rate_limit",
+"error": "Rate limit exceeded. Try again in Xm..."
+```
+
+**Cause:** Groq free tier allows 200k tokens/day (~25–100 investigations depending on complexity).
+
+**Solutions:**
+- Wait for the daily quota to reset (resets at midnight UTC)
+- Increase `delay_between_queries` in bulk requests: `?delay_between_queries=5.0`
+- Reduce bulk batch size to 3–5 queries
+
+---
+
+### 8. Alembic Migration Issues
+
+**Check migration status:**
+```powershell
+.venv\Scripts\alembic.exe current
+.venv\Scripts\alembic.exe history
+```
+
+**Apply pending migrations:**
+```powershell
+.venv\Scripts\alembic.exe upgrade head
+```
+
+**Verify schema matches models:**
+```powershell
+python backend\scripts\verify_schema.py
+```
+
+---
+
+### 9. Query Analysis Using Fallback
+
+**Symptom:** Bulk results show `[FALLBACK]` on the question type.
+
+**Cause:** The LLM returned truncated or malformed JSON during query analysis. The system fell back to deterministic keyword extraction and continued the investigation.
+
+**Effect:** Retrieval quality may be slightly lower — the fallback uses simpler keyword matching rather than LLM-generated search strategies. The investigation still completes and returns evidence-grounded results.
+
+**Fix:** Usually transient. If persistent, check `GROQ_API_KEY` is valid and the model is available.
+
+---
+
+## Quick Diagnostics
+
+```powershell
+# Check what's indexed
 python check_data.py
 
-# If empty, you need to index a repository first
-# Use the API to add and index a repository
-```
+# Check call graph relationships
+python check_relationships.py
 
-### 6. Vector Index Missing
+# Verify DB schema matches models
+python backend\scripts\verify_schema.py
 
-**Error:**
-```
-Collection 'repository_code' not found
-```
+# Check if server is responding
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/docs" -Method GET
 
-**Solution:**
-The vector index is created automatically when you run:
-```
-POST /repositories/{id}/vector-index
-```
-
-### 7. Server Won't Stop
-
-**Solution:**
-```powershell
-# Nuclear option - kill all Python processes
-Stop-Process -Name python -Force
-```
-
-⚠️ **Warning:** This will kill ALL Python processes, including other projects!
-
-## Quick Commands
-
-```powershell
-# Check what's running on port 8000
+# View processes on port 8000
 Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
 
-# Check for Python processes
-Get-Process python*
-
-# Check if lock file exists
+# Check for Qdrant lock file
 Test-Path "data\qdrant\.lock"
-
-# View database stats
-python check_data.py
-
-# Test Qdrant connection
-python check_redis.py
 ```
+
+---
 
 ## Prevention
 
-To avoid issues:
-1. Always use `.\stop_server.ps1` to stop the server (don't just Ctrl+C)
-2. Use `.\start_server.ps1` to start the server (handles cleanup automatically)
-3. Don't run multiple instances of the backend simultaneously
-4. Keep your virtual environment activated when working
-
-## Still Having Issues?
-
-Check the logs in the terminal where Uvicorn is running for detailed error messages.
+1. Always use `.\stop_server.ps1` to stop the server — don't just close the terminal
+2. Use `.\start_server.ps1` to start — it handles port cleanup and lock removal
+3. Never run two server instances at once (Qdrant uses exclusive file locking)
+4. After changing investigator service code, re-index with `python backend\scripts\reindex.py --repo-id 1`

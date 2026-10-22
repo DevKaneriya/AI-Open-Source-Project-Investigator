@@ -128,25 +128,25 @@ class RetrievalService:
             )
 
         # ---------------------------------------------------------
-        # 1. Analyze user query
+        # 1. Analyze user query — use fallback so LLM failure
+        #    never aborts the whole investigation
         # ---------------------------------------------------------
+
+        import time as _time
+        _qa_start = _time.time()
 
         try:
             query_analysis = (
-                self.query_analyzer_service.analyze(query)
-            )
-        except RuntimeError as e:
-            # LLM service configuration error
-            raise RuntimeError(
-                f"Query analysis failed due to LLM service configuration: {str(e)}"
+                self.query_analyzer_service.analyze_with_fallback(query)
             )
         except Exception as e:
-            # Other LLM-related errors (network, rate limits, parsing)
-            import logging
-            logging.error(f"Query analysis error: {e}", exc_info=True)
+            import logging as _log
+            _log.error(f"Query analysis failed completely: {e}", exc_info=True)
             raise RuntimeError(
                 f"Query analysis failed: {str(e)}"
             )
+
+        _qa_seconds = round(_time.time() - _qa_start, 3)
 
         symbol_queries = self._prepare_queries(
             query_analysis.symbol_queries,
@@ -300,6 +300,28 @@ class RetrievalService:
             repository.local_path,
             source_candidates,
         )
+
+        # ---------------------------------------------------------
+        # 5b. Targeted follow-up retrieval for flow questions
+        #
+        # For feature_flow and end_to_end_flow questions the initial
+        # symbol search may only surface entry points.  We augment
+        # evidence by searching for the functions those symbols CALL
+        # so the LLM can see the full execution path.
+        # ---------------------------------------------------------
+
+        if query_analysis.question_type in (
+            QuestionType.FEATURE_FLOW,
+            QuestionType.END_TO_END_FLOW,
+        ):
+            flow_extra = self._targeted_flow_retrieval(
+                db=db,
+                repository_id=repository_id,
+                repository_path=repository.local_path,
+                symbol_results=symbol_results,
+                existing_source_context=source_context,
+            )
+            source_context = source_context + flow_extra
 
         # ---------------------------------------------------------
         # 6. Code relationships
@@ -460,6 +482,8 @@ class RetrievalService:
                 "evidence_candidates": evidence_summary.get("candidate_count", 0),
                 "evidence_selected": evidence_summary.get("selected_count", 0),
                 "execution_time_seconds": execution_time,
+                "query_analysis_seconds": _qa_seconds,
+                "used_fallback_analysis": query_analysis.intent.startswith("[fallback]"),
             },
             
             # Metadata
@@ -858,6 +882,127 @@ class RetrievalService:
         return relationships
 
     # =============================================================
+    # TARGETED FLOW RETRIEVAL
+    #
+    # For feature_flow / end_to_end_flow questions we look up which
+    # symbols are CALLED by the already-found symbols and retrieve
+    # their source so the LLM can trace the execution path.
+    # =============================================================
+
+    def _targeted_flow_retrieval(
+        self,
+        db: Session,
+        repository_id: int,
+        repository_path: str,
+        symbol_results: list[dict],
+        existing_source_context: list[dict],
+        max_extra_contexts: int = 6,
+    ) -> list[dict]:
+        """Fetch source for symbols that are called by the initial hit-set.
+
+        Avoids re-fetching code that is already present in
+        *existing_source_context*.
+
+        Returns a list of additional source-context dicts (may be empty).
+        """
+        import logging
+        log = logging.getLogger(__name__)
+
+        # Build set of file+line ranges we already have so we don't duplicate
+        existing_keys: set[tuple] = {
+            (
+                str(ctx.get("file", "")).replace("\\", "/"),
+                ctx.get("start_line"),
+                ctx.get("end_line"),
+            )
+            for ctx in existing_source_context
+        }
+
+        extra: list[dict] = []
+
+        for hit in symbol_results[:8]:  # cap to avoid combinatorial explosion
+            symbol_name = hit.get("name") or hit.get("symbol")
+            if not symbol_name:
+                continue
+
+            try:
+                calls = self.code_relationship_service.get_calls(
+                    db=db,
+                    repository_id=repository_id,
+                    symbol_name=symbol_name,
+                )
+            except Exception as exc:
+                log.debug("flow retrieval: get_calls(%s) failed: %s", symbol_name, exc)
+                continue
+
+            for call in calls:
+                called_name = call.get("called_name", "")
+                # Filter obviously malformed entries
+                if (
+                    not called_name
+                    or len(called_name) <= 1
+                    or any(ch in called_name for ch in "{}()[],;")
+                ):
+                    continue
+
+                # Look up the symbol definition so we get file + line numbers
+                try:
+                    # Reuse the existing code search service via a local session
+                    db2 = SessionLocal()
+                    try:
+                        svc = CodeSearchService()
+                        matches = svc.search(
+                            db=db2,
+                            repository_id=repository_id,
+                            query=called_name,
+                        )
+                    finally:
+                        db2.close()
+                except Exception as exc:
+                    log.debug(
+                        "flow retrieval: symbol search for '%s' failed: %s",
+                        called_name,
+                        exc,
+                    )
+                    continue
+
+                for match in matches[:2]:  # at most 2 definitions per called name
+                    file_path = match.get("file")
+                    start_line = match.get("start_line")
+                    end_line = match.get("end_line")
+
+                    if not file_path or start_line is None:
+                        continue
+
+                    key = (
+                        str(file_path).replace("\\", "/"),
+                        start_line,
+                        end_line,
+                    )
+                    if key in existing_keys:
+                        continue
+
+                    existing_keys.add(key)
+
+                    try:
+                        src = self.code_retrieval_service.get_source(
+                            repository_path=repository_path,
+                            file_path=file_path,
+                            start_line=start_line,
+                            end_line=end_line if end_line else start_line + 30,
+                        )
+                        extra.append(src)
+                    except (FileNotFoundError, ValueError, OSError) as exc:
+                        log.debug(
+                            "flow retrieval: get_source(%s) failed: %s", file_path, exc
+                        )
+
+                    if len(extra) >= max_extra_contexts:
+                        return extra
+
+        return extra
+
+    # =============================================================
     # MULTI-STAGE ARCHITECTURAL RETRIEVAL
     # =============================================================
 
@@ -880,6 +1025,7 @@ class RetrievalService:
         architectural_files = self.architectural_file_service.discover_key_files(
             db=db,
             repository_id=repository_id,
+            repository_path=repository_path,
         )
         
         evidence = []
