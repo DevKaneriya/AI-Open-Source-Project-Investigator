@@ -183,6 +183,11 @@ def search_repository(
     }
     
     
+@app.get("/repositories", tags=["Repositories"])
+def list_repositories(db: Session = Depends(get_db)):
+    return repository_service.list_repositories(db)
+
+
 @app.post("/repositories")
 def add_repository(
     request: RepositoryRequest,
@@ -192,6 +197,38 @@ def add_repository(
         db,
         request.repository_url,
     )
+
+
+@app.delete("/repositories/{repository_id}", tags=["Repositories"])
+def delete_repository(
+    repository_id: int,
+    db: Session = Depends(get_db),
+):
+    # Delete the repository's vectors from Qdrant first. The vectors are
+    # re-derivable via re-indexing, so removing them before the PostgreSQL rows
+    # is the safer order: if the PostgreSQL delete fails afterwards the rows
+    # still exist and can simply be re-indexed.
+    #
+    # The two stores cannot share a transaction, so if the vector DB is
+    # unreachable we log a warning and still proceed with the PostgreSQL
+    # deletion so the user is not blocked by a transient vector-DB outage.
+    # Any orphaned vectors left behind can be cleaned up later by re-indexing.
+    try:
+        vector_service.delete_repository(repository_id)
+    except Exception as exc:
+        print(
+            f"WARNING: Failed to delete vectors for repository "
+            f"{repository_id} from Qdrant: {exc}. "
+            f"Proceeding with PostgreSQL deletion; orphaned vectors may remain."
+        )
+
+    deleted = repository_service.delete_repository(db, repository_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found.",
+        )
+    return {"message": "Repository deleted successfully.", "repository_id": repository_id}
     
     
 @app.get("/repositories/{repository_id}/source")
