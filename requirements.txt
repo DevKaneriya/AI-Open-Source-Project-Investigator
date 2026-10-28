@@ -11,3 +11,5 @@ tree-sitter-language-pack
 qdrant-client
 sentence-transformers
 groq
+langgraph
+langchain-core

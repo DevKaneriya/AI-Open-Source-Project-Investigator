@@ -27,7 +27,7 @@ class AnswerGenerationService:
     # and the total stays comfortably inside an 8 192-token context window.
     # 500 was too small: it cut CartSyncView (1 672 chars) before the POST
     # body and CheckoutView (3 337 chars) before the order-creation logic.
-    MAX_SNIPPET_LENGTH = 2200  # Max chars per code snippet
+    MAX_SNIPPET_LENGTH = 1600  # Max chars per code snippet (fits medium functions and stays under 8192 token limit)
     
     def __init__(self, llm_service: LLMService):
         self.llm_service = llm_service
@@ -38,6 +38,7 @@ class AnswerGenerationService:
         evidence: list[dict],
         question_type: str | None = None,
         repository_name: str | None = None,
+        evaluation_context: dict | None = None,
     ) -> InvestigationAnswer:
         """
         Generate evidence-grounded answer from retrieved evidence.
@@ -80,7 +81,7 @@ class AnswerGenerationService:
         
         # Generate answer using LLM
         try:
-            system_prompt = self._build_system_prompt(question_type, repository_name)
+            system_prompt = self._build_system_prompt(question_type, repository_name, evaluation_context)
             user_prompt = self._build_user_prompt(question, prepared_evidence)
             response_schema = self._get_response_schema()
             
@@ -98,6 +99,7 @@ class AnswerGenerationService:
                 question=question,
                 llm_response=llm_response,
                 supplied_evidence=prepared_evidence,
+                evaluation_context=evaluation_context,
             )
             
             return answer
@@ -208,7 +210,12 @@ class AnswerGenerationService:
         
         return prepared
     
-    def _build_system_prompt(self, question_type: str | None, repository_name: str | None) -> str:
+    def _build_system_prompt(
+        self,
+        question_type: str | None,
+        repository_name: str | None,
+        evaluation_context: dict | None = None,
+    ) -> str:
         """Build system prompt enforcing evidence-grounded generation with citation tracking."""
         
         repo_context = f" in the {repository_name} repository" if repository_name else ""
@@ -266,6 +273,23 @@ HANDLING GAPS:
 - If evidence conflicts, explain the conflict in limitations
 - Never assume two components are connected just because both appear in evidence
 - List specific missing information in the limitations array"""
+
+        if evaluation_context:
+            missing_stages = evaluation_context.get("missing_stages", [])
+            unverified_conns = evaluation_context.get("unverified_connections", [])
+            if missing_stages or unverified_conns:
+                prompt += "\n\nFLOW AUDIT & VERIFICATION CONSTRAINTS:\n"
+                if missing_stages:
+                    prompt += f"- MISSING STAGES: {', '.join(missing_stages)}. You MUST explicitly state that these stages are missing from the retrieved evidence.\n"
+                if unverified_conns:
+                    prompt += f"- UNVERIFIED CONNECTIONS: {'; '.join(unverified_conns)}. You MUST NOT assume or assert these connections exist.\n"
+                prompt += (
+                    "- CRITICAL: If a guest-cart merge endpoint (such as CartSyncView) appears in evidence, "
+                    "do NOT describe it as the normal quantity-update endpoint unless evidence directly proves "
+                    "the UI or URL route calls it for normal quantity updates.\n"
+                    "- When required stages or connections are missing, confidence MUST NOT be 'high'. Set confidence "
+                    "to 'partial' or 'insufficient' and document all gaps in the limitations array.\n"
+                )
 
         if question_type:
             type_guidance = self._get_question_type_guidance(question_type)
@@ -365,6 +389,7 @@ HANDLING GAPS:
         question: str,
         llm_response: dict,
         supplied_evidence: list[dict],
+        evaluation_context: dict | None = None,
     ) -> InvestigationAnswer:
         """
         Validate LLM response and construct InvestigationAnswer with full citations.
@@ -408,6 +433,23 @@ HANDLING GAPS:
         if confidence == 'high' and len(citations) < 1:
             logger.info("Downgrading confidence from 'high' to 'partial' due to no citations")
             confidence = 'partial'
+            
+        # Enforce evaluation context constraints (missing stages / unverified connections)
+        if evaluation_context:
+            missing_stages = evaluation_context.get("missing_stages", [])
+            unverified_conns = evaluation_context.get("unverified_connections", [])
+            if missing_stages or unverified_conns:
+                if confidence == 'high':
+                    logger.info("Downgrading confidence from 'high' to 'partial' due to unverified flow stages")
+                    confidence = 'partial'
+                for stage in missing_stages:
+                    msg = f"Missing flow stage: {stage}"
+                    if not any(stage in str(lim) for lim in limitations):
+                        limitations = list(limitations) + [msg]
+                for conn in unverified_conns:
+                    msg = f"Unverified connection: {conn}"
+                    if not any(conn[:30] in str(lim) for lim in limitations):
+                        limitations = list(limitations) + [msg]
         
         return InvestigationAnswer(
             question=question,

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from fastapi import Depends, HTTPException
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import settings
@@ -28,6 +29,9 @@ from backend.app.services.retrieval_service import RetrievalService
 from backend.app.services.llm_service import LLMService
 from backend.app.services.query_analyzer_service import QueryAnalyzerService
 from backend.app.services.answer_generation_service import AnswerGenerationService
+from backend.app.services.evidence_evaluation_service import EvidenceEvaluationService
+from backend.app.services.citation_validation_service import CitationValidationService
+from backend.app.services.investigation_graph import InvestigationGraphService
 
 from backend.app.models.repository import Repository
 from backend.app.models.repository_file import RepositoryFile
@@ -87,11 +91,35 @@ answer_generation_service = AnswerGenerationService(
     llm_service=llm_service,
 )
 
+evidence_evaluation_service = EvidenceEvaluationService(
+    llm_service=llm_service,
+)
+
+citation_validation_service = CitationValidationService(
+    llm_service=llm_service,
+)
+
+investigation_graph_service = InvestigationGraphService(
+    retrieval_service=retrieval_service,
+    query_analyzer_service=query_analyzer_service,
+    answer_generation_service=answer_generation_service,
+    evidence_evaluation_service=evidence_evaluation_service,
+    citation_validation_service=citation_validation_service,
+)
+
 
 class RepositoryRequest(BaseModel):
     repository_url: str
 
 
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "AI Open-Source Project Investigator",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
 
 @app.post("/repositories/scan")
 def scan_repository(request: RepositoryRequest):
@@ -269,15 +297,12 @@ def investigate_repository(
     db: Session = Depends(get_db),
 ) -> InvestigationResponse:
     """
-    Generate evidence-grounded technical answer to a repository question.
+    Generate evidence-grounded technical answer to a repository question using LangGraph.
     
     This endpoint:
-    1. Retrieves relevant code evidence using the full retrieval pipeline
-    2. Generates a natural language answer grounded in that evidence
-    3. Returns the answer with citations to specific source locations
-    
-    Use this endpoint when you need a explained answer.
-    Use /retrieve if you only need raw evidence without explanation.
+    1. Orchestrates multi-node investigation workflow with LangGraph StateGraph
+    2. Performs bounded iterative retrieval with sufficiency evaluation
+    3. Generates grounded answer with validated citations and audit metadata
     
     Args:
         repository_id: Repository database ID
@@ -292,50 +317,16 @@ def investigate_repository(
         400: Invalid query or retrieval failed
         500: LLM service error or unexpected failure
     """
-    import time
-    start_time = time.time()
+    if not query or not query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
     
     try:
-        # Use the existing retrieval pipeline to get evidence
-        retrieval_result = retrieval_service.retrieve(
+        response = investigation_graph_service.run(
             db=db,
             repository_id=repository_id,
             query=query,
-            semantic_limit=10,
+            max_additional_rounds=2,
         )
-        
-        # Extract relevant data from retrieval result
-        evidence = retrieval_result.get('evidence', [])
-        question_type = retrieval_result['query_analysis'].get('question_type')
-        repository = retrieval_result['repository']
-        
-        # Generate evidence-grounded answer
-        investigation_answer = answer_generation_service.generate_answer(
-            question=query,
-            evidence=evidence,
-            question_type=question_type,
-            repository_name=repository.get('name'),
-        )
-        
-        # Add execution time
-        execution_time = round(time.time() - start_time, 3)
-        investigation_answer.execution_time_seconds = execution_time
-        
-        # Construct response
-        response = InvestigationResponse(
-            repository=repository,
-            query=query,
-            question_type=question_type,
-            investigation=investigation_answer,
-            evidence_summary=retrieval_result.get('summary', {}),
-            metadata={
-                'version': '1.0',
-                'timestamp': time.time(),
-                'retrieval_time_seconds': retrieval_result.get('summary', {}).get('execution_time_seconds', 0),
-                'total_time_seconds': execution_time,
-            }
-        )
-        
         return response
 
     except ValueError as exc:
