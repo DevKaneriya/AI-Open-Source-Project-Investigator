@@ -4,55 +4,30 @@ Sidebar navigation, target repository selection, and session history management.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
 from frontend.api_client import ApiClient
 from frontend.utils.formatting import format_timestamp
+from frontend.utils.repo_manager import sync_repositories
+from frontend.utils.history_manager import load_history, clear_history
 
 
 def _sidebar_header() -> None:
-    """Render the polished top-header block inside the sidebar."""
-    # Try to load a logo image; fall back to an emoji icon
-    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
-    has_logo = logo_path.is_file()
-
-    # Render as a single HTML card so icon + text are always on one line,
-    # vertically centred, with consistent padding.
-    if has_logo:
-        # Streamlit needs st.image for actual images; put it alongside HTML text
-        icon_col, text_col = st.columns([1, 5], gap="small")
-        with icon_col:
-            st.image(str(logo_path), width=36)
-        with text_col:
-            st.markdown(
-                """
-                <div style="padding: 2px 0 0 0;">
-                    <p style="margin:0; font-size:1.02rem; font-weight:700; color:#58a6ff; line-height:1.2;">
-                        OpenSource Investigator
-                    </p>
-                    <p style="margin:2px 0 0 0; font-size:0.7rem; color:#6e7681; line-height:1.3;">
-                        Evidence-grounded AI code investigation
-                    </p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    else:
-        st.markdown(
-            """
-            <div class="sidebar-header">
-                <span class="sidebar-icon">⚡</span>
-                <div>
-                    <p class="sidebar-title">OpenSource Investigator</p>
-                    <p class="sidebar-subtitle">Evidence-grounded AI code investigation</p>
-                </div>
+    """Render the sleek developer-focused brand header inside the sidebar."""
+    st.markdown(
+        """
+        <div class="sidebar-brand">
+            <div class="sidebar-brand-badge">⚡</div>
+            <div class="sidebar-brand-text">
+                <span class="sidebar-brand-title">OpenSource Investigator</span>
+                <span class="sidebar-brand-sub">AI Code Intelligence</span>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_sidebar(api_client: ApiClient) -> str:
@@ -64,16 +39,14 @@ def render_sidebar(api_client: ApiClient) -> str:
         # ── Header ────────────────────────────────────────────────────────────
         _sidebar_header()
 
-        st.divider()
-
         # ── Primary Navigation ────────────────────────────────────────────────
         st.markdown(
-            '<p class="sidebar-section-label">Navigation</p>',
+            '<p class="sidebar-section-label">🗂 Navigation</p>',
             unsafe_allow_html=True,
         )
 
         nav_options = {
-            "🔎  Investigation": "investigation",
+            "🔍  Investigation": "investigation",
             "📦  Repositories": "repositories",
             "🚦  System Status": "status",
         }
@@ -94,7 +67,8 @@ def render_sidebar(api_client: ApiClient) -> str:
         selected_page = nav_options[selected_label]
         st.session_state["active_page"] = selected_page
 
-        st.divider()
+        # ── Divider ───────────────────────────────────────────────────────────
+        st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
 
         # ── Target Repository Selector ────────────────────────────────────────
         st.markdown(
@@ -102,16 +76,24 @@ def render_sidebar(api_client: ApiClient) -> str:
             unsafe_allow_html=True,
         )
 
-        session_repos = st.session_state.get("session_repositories", [])
-        if session_repos:
+        repo_error = st.session_state.get("repositories_error")
+        repos = st.session_state.get("repositories", [])
+
+        if repo_error:
+            st.markdown(
+                f'<p class="sidebar-error-msg">⚠️ {repo_error}</p>',
+                unsafe_allow_html=True,
+            )
+
+        if repos:
             repo_map = {
                 f"#{r['id']}  {r.get('name', 'Repository')}": r
-                for r in session_repos
-                if "id" in r
+                for r in repos
+                if isinstance(r, dict) and "id" in r
             }
-            current_id = st.session_state.get("selected_repo_id", 2)
-            sel_idx = 0
+            current_id = st.session_state.get("selected_repo_id")
             labels = list(repo_map.keys())
+            sel_idx = 0
             for idx, lbl in enumerate(labels):
                 if repo_map[lbl]["id"] == current_id:
                     sel_idx = idx
@@ -128,27 +110,36 @@ def render_sidebar(api_client: ApiClient) -> str:
             st.session_state["selected_repo"] = active_data
             st.session_state["selected_repo_id"] = active_data["id"]
 
-            # Compact status pill
             status = active_data.get("status", "")
             status_colour = (
                 "#3fb950" if status == "indexed"
                 else "#d29922" if status in ("active", "cloned")
                 else "#8b949e"
             )
+            clean_url = api_client.base_url.replace("http://", "").replace("https://", "")
             st.markdown(
-                f'<span style="font-size:0.75rem; color:{status_colour};">● {status.capitalize() if status else "Ready"}</span>',
+                f"""
+                <div class="repo-status-row">
+                    <span style="color:{status_colour}; font-weight:500;">● {status.capitalize() if status else "Ready"}</span>
+                    <span style="color:#6e7681;" title="{api_client.base_url}">🔌 {clean_url}</span>
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
         else:
-            st.caption("No repositories configured yet.")
+            if not repo_error:
+                st.markdown(
+                    '<p class="sidebar-caption">No repositories configured yet.</p>',
+                    unsafe_allow_html=True,
+                )
+            clean_url = api_client.base_url.replace("http://", "").replace("https://", "")
+            st.markdown(
+                f'<p class="sidebar-caption">🔌 {clean_url}</p>',
+                unsafe_allow_html=True,
+            )
 
-        # Backend URL pill
-        st.markdown(
-            f'<p style="font-size:0.72rem; color:#6e7681; margin-top:8px;">🔌 {api_client.base_url}</p>',
-            unsafe_allow_html=True,
-        )
-
-        st.divider()
+        # ── Divider ───────────────────────────────────────────────────────────
+        st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
 
         # ── Recent Investigations ─────────────────────────────────────────────
         st.markdown(
@@ -156,19 +147,22 @@ def render_sidebar(api_client: ApiClient) -> str:
             unsafe_allow_html=True,
         )
 
-        history: list[dict[str, Any]] = st.session_state.get("investigation_history", [])
+        history = load_history()
 
         if not history:
-            st.caption("No investigations in this session yet.")
+            st.markdown(
+                '<p class="sidebar-caption">No recent queries yet.</p>',
+                unsafe_allow_html=True,
+            )
         else:
-            for idx, item in enumerate(history[:6]):
+            for idx, item in enumerate(history[:5]):
                 q = item.get("query", "Query")
                 repo_name = item.get("repository_name", "")
                 conf = item.get("confidence", "")
                 ts = format_timestamp(item.get("timestamp"))
 
-                short_q = (q[:35] + "…") if len(q) > 35 else q
-                label = f"{short_q}"
+                short_q = (q[:28] + "…") if len(q) > 28 else q
+                label = f"💬 {short_q}"
 
                 if st.button(
                     label,
@@ -178,17 +172,17 @@ def render_sidebar(api_client: ApiClient) -> str:
                 ):
                     st.session_state["latest_investigation"] = item.get("response")
                     st.session_state["query_input_text"] = q
+                    st.session_state["query_input_area"] = q
                     st.session_state["selected_repo_id"] = item.get("repository_id")
                     st.session_state["active_page"] = "investigation"
                     st.rerun()
 
-            st.markdown("")
             if st.button(
                 "🗑 Clear History",
                 key="btn_clear_hist",
                 use_container_width=True,
             ):
-                st.session_state["investigation_history"] = []
+                clear_history()
                 st.rerun()
 
     return selected_page

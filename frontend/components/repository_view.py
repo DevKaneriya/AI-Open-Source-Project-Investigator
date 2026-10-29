@@ -1,6 +1,6 @@
 """
 Repository Management component: active repository selection, registration,
-indexing triggers, and architectural scan.
+indexing triggers, deletion, and architectural scan.
 """
 
 from __future__ import annotations
@@ -10,31 +10,16 @@ from typing import Any
 from frontend.api_client import (
     ApiClient,
     BackendConnectionError,
-    EndpointNotImplementedError,
     ApiClientError,
 )
-
-# Known repository presets for developer convenience
-DEFAULT_PRESET_REPOSITORIES = [
-    {
-        "id": 2,
-        "name": "Crumbs",
-        "url": "https://github.com/dogukanayd/crumbs",
-        "status": "indexed",
-        "notes": "Full-stack e-commerce project (Django backend + Angular frontend). Already indexed.",
-    },
-    {
-        "id": 1,
-        "name": "Target Repository #1",
-        "url": "",
-        "status": "active",
-        "notes": "Custom registered repository #1",
-    },
-]
+from frontend.utils.repo_manager import (
+    sync_repositories,
+    invalidate_repositories_cache,
+)
 
 
 def render_repository_view(api_client: ApiClient) -> None:
-    """Render repository configuration, registration, and indexing pipeline tools."""
+    """Render repository configuration, registration, deletion, and indexing pipeline tools."""
     st.markdown(
         """
         <div style="margin-bottom: 4px;">
@@ -50,56 +35,44 @@ def render_repository_view(api_client: ApiClient) -> None:
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
     # ── Section 1: Active Repository Selection & List ──────────────────────────
-    st.markdown(
-        '<p style="font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:#6e7681; margin:16px 0 6px 0;">🎯 Active Target Repository</p>',
-        unsafe_allow_html=True,
-    )
+    col_s1_title, col_s1_ref = st.columns([5, 1], gap="small")
+    with col_s1_title:
+        st.markdown(
+            '<p style="font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:#6e7681; margin:16px 0 6px 0;">🎯 Active Target Repository</p>',
+            unsafe_allow_html=True,
+        )
+    with col_s1_ref:
+        if st.button("🔄 Refresh", key="repo_view_refresh_btn", help="Fetch latest repositories from backend"):
+            sync_repositories(api_client, force_refresh=True)
+            st.rerun()
 
-    # Initialize session repositories list if not present
-    if "session_repositories" not in st.session_state:
-        st.session_state["session_repositories"] = list(DEFAULT_PRESET_REPOSITORIES)
+    # Synchronize with backend (single source of truth)
+    repos, repo_err = sync_repositories(api_client)
 
-    session_repos: list[dict[str, Any]] = st.session_state["session_repositories"]
-
-    # Check if backend exposes a live GET /repositories endpoint
-    backend_repos: list[dict[str, Any]] | None = None
-    endpoint_missing = False
-    try:
-        backend_repos = api_client.list_repositories()
-    except EndpointNotImplementedError:
-        endpoint_missing = True
-    except BackendConnectionError:
-        backend_repos = None
-    except Exception:
-        backend_repos = None
-
-    if endpoint_missing:
+    if repo_err:
+        st.error(
+            f"⚠️ **Backend Repository Error:** {repo_err}\n\n"
+            "Unable to communicate with the repository API. Please ensure the backend is running.",
+            icon="⚠️",
+        )
+    elif not repos:
         st.info(
-            "**Backend API Notice:** The FastAPI backend does not currently implement a "
-            "`GET /repositories` endpoint. Repositories are managed via direct Repository ID "
-            "and session state. Any newly registered repository via `POST /repositories` will be "
-            "automatically retained here.",
+            "No repositories are currently registered in the database. "
+            "Use the form below to clone and register a GitHub repository.",
             icon="ℹ️",
         )
-    elif backend_repos:
-        # Merge backend repositories with session list
-        existing_ids = {r["id"] for r in session_repos if "id" in r}
-        for br in backend_repos:
-            if br.get("id") not in existing_ids:
-                session_repos.append(br)
+    else:
+        # Repositories are available from backend
+        repo_options = {
+            f"ID #{r['id']} — {r.get('name', 'Repository')} ({r.get('url') or 'Local'})": r
+            for r in repos
+            if isinstance(r, dict) and "id" in r
+        }
 
-    # Display selector
-    repo_options = {
-        f"ID {r['id']} — {r.get('name', 'Repository')} ({r.get('url') or 'Local'})": r
-        for r in session_repos
-        if "id" in r
-    }
-
-    current_repo_id = st.session_state.get("selected_repo_id", 2)
-    current_label_idx = 0
-
-    if repo_options:
+        current_repo_id = st.session_state.get("selected_repo_id")
+        current_label_idx = 0
         labels = list(repo_options.keys())
+
         for idx, lbl in enumerate(labels):
             if repo_options[lbl]["id"] == current_repo_id:
                 current_label_idx = idx
@@ -126,32 +99,26 @@ def render_repository_view(api_client: ApiClient) -> None:
 
         if selected_data.get("url"):
             st.markdown(f"**Source URL:** [{selected_data['url']}]({selected_data['url']})")
-        if selected_data.get("notes"):
-            st.caption(f"Note: {selected_data['notes']}")
+        if selected_data.get("local_path"):
+            st.caption(f"Local Storage: `{selected_data['local_path']}`")
 
-    # Manual ID Override
-    with st.expander("⚙️ Manual Repository ID Override", expanded=False):
-        col_mid, col_mset = st.columns([3, 1])
-        with col_mid:
-            manual_id = st.number_input(
-                "Enter custom Repository ID directly:",
-                min_value=1,
-                value=int(current_repo_id or 1),
-                step=1,
+        # Delete repository button
+        with st.expander("🗑️ Delete Repository", expanded=False):
+            st.warning(
+                f"Deleting **{selected_data.get('name')}** (ID #{selected_data['id']}) will remove all "
+                "its indexed code files, symbols, chunks, and database records."
             )
-        with col_mset:
-            st.write("")
-            st.write("")
-            if st.button("Set ID", use_container_width=True):
-                st.session_state["selected_repo_id"] = int(manual_id)
-                st.session_state["selected_repo"] = {
-                    "id": int(manual_id),
-                    "name": f"Repository #{manual_id}",
-                    "url": "",
-                    "status": "custom",
-                }
-                st.success(f"Active repository set to ID {manual_id}")
-                st.rerun()
+            col_del_btn, _ = st.columns([1, 4])
+            with col_del_btn:
+                if st.button("Confirm Delete", key="btn_confirm_delete_repo", type="primary"):
+                    try:
+                        api_client.delete_repository(selected_data["id"])
+                        st.success(f"Repository #{selected_data['id']} deleted successfully.")
+                        invalidate_repositories_cache()
+                        sync_repositories(api_client, force_refresh=True)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Failed to delete repository: {exc}")
 
     st.divider()
 
@@ -183,19 +150,15 @@ def render_repository_view(api_client: ApiClient) -> None:
                     st.success("✅ Repository successfully registered!")
                     st.json(add_result)
 
-                    # Update session state with the new repository
-                    new_entry = {
-                        "id": add_result.get("id"),
-                        "name": add_result.get("name"),
-                        "url": add_result.get("url"),
-                        "status": add_result.get("status", "cloned"),
-                        "local_path": add_result.get("local_path"),
-                    }
-                    if new_entry["id"]:
-                        st.session_state["session_repositories"].append(new_entry)
-                        st.session_state["selected_repo"] = new_entry
-                        st.session_state["selected_repo_id"] = new_entry["id"]
-                        st.rerun()
+                    # Invalidate cache and force refresh from backend
+                    invalidate_repositories_cache()
+                    sync_repositories(api_client, force_refresh=True)
+
+                    if add_result.get("id"):
+                        st.session_state["selected_repo_id"] = add_result["id"]
+                        st.session_state["selected_repo"] = add_result
+
+                    st.rerun()
 
                 except BackendConnectionError as exc:
                     st.error(f"Backend unreachable: {exc}")
@@ -205,52 +168,63 @@ def render_repository_view(api_client: ApiClient) -> None:
     st.divider()
 
     # ── Section 3: Indexing Pipeline ───────────────────────────────────────────
+    active_repo_id = st.session_state.get("selected_repo_id")
     st.markdown(
         '<p style="font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:#6e7681; margin:16px 0 6px 0;">⚙️ Indexing &amp; Vectorization Pipeline</p>',
         unsafe_allow_html=True,
     )
-    st.markdown(
-        f"Trigger backend indexing stages for **Repository #{current_repo_id}**. "
-        "These endpoints execute AST symbol extraction, chunking, and Qdrant vector indexing."
-    )
 
-    col_idx1, col_idx2, col_idx3 = st.columns(3)
+    if not active_repo_id:
+        st.warning("Please register or select a repository above before running the indexing pipeline.")
+    else:
+        st.markdown(
+            f"Trigger backend indexing stages for **Repository #{active_repo_id}**. "
+            "These endpoints execute AST symbol extraction, chunking, and Qdrant vector indexing."
+        )
 
-    with col_idx1:
-        st.markdown("**1. Code Indexing**")
-        st.caption("Parses AST, symbols, imports, and file tree (`POST /repositories/{id}/index`).")
-        if st.button("Run Code Indexer", key="btn_run_indexer", use_container_width=True):
-            with st.spinner("Indexing repository symbols..."):
-                try:
-                    res = api_client.index_repository(int(current_repo_id))
-                    st.success("Code indexing complete!")
-                    st.json(res)
-                except Exception as exc:
-                    st.error(f"Indexing error: {exc}")
+        col_idx1, col_idx2, col_idx3 = st.columns(3)
 
-    with col_idx2:
-        st.markdown("**2. Create Chunks**")
-        st.caption("Generates syntactic code chunks (`POST /repositories/{id}/chunks`).")
-        if st.button("Create Code Chunks", key="btn_create_chunks", use_container_width=True):
-            with st.spinner("Generating code chunks..."):
-                try:
-                    res = api_client.create_chunks(int(current_repo_id))
-                    st.success("Chunks created successfully!")
-                    st.json(res)
-                except Exception as exc:
-                    st.error(f"Chunking error: {exc}")
+        with col_idx1:
+            st.markdown("**1. Code Indexing**")
+            st.caption("Parses AST, symbols, imports, and file tree (`POST /repositories/{id}/index`).")
+            if st.button("Run Code Indexer", key="btn_run_indexer", use_container_width=True):
+                with st.spinner("Indexing repository symbols..."):
+                    try:
+                        res = api_client.index_repository(int(active_repo_id))
+                        st.success("Code indexing complete!")
+                        st.json(res)
+                        invalidate_repositories_cache()
+                        sync_repositories(api_client, force_refresh=True)
+                    except Exception as exc:
+                        st.error(f"Indexing error: {exc}")
 
-    with col_idx3:
-        st.markdown("**3. Vector Indexing**")
-        st.caption("Embeds chunks and writes to Qdrant (`POST /repositories/{id}/vector-index`).")
-        if st.button("Index Vectors (Qdrant)", key="btn_index_vectors", use_container_width=True):
-            with st.spinner("Generating embeddings & updating Qdrant collection..."):
-                try:
-                    res = api_client.index_vectors(int(current_repo_id))
-                    st.success("Vector indexing complete!")
-                    st.json(res)
-                except Exception as exc:
-                    st.error(f"Vector indexing error: {exc}")
+        with col_idx2:
+            st.markdown("**2. Create Chunks**")
+            st.caption("Generates syntactic code chunks (`POST /repositories/{id}/chunks`).")
+            if st.button("Create Code Chunks", key="btn_create_chunks", use_container_width=True):
+                with st.spinner("Generating code chunks..."):
+                    try:
+                        res = api_client.create_chunks(int(active_repo_id))
+                        st.success("Chunks created successfully!")
+                        st.json(res)
+                        invalidate_repositories_cache()
+                        sync_repositories(api_client, force_refresh=True)
+                    except Exception as exc:
+                        st.error(f"Chunking error: {exc}")
+
+        with col_idx3:
+            st.markdown("**3. Vector Indexing**")
+            st.caption("Embeds chunks and writes to Qdrant (`POST /repositories/{id}/vector-index`).")
+            if st.button("Index Vectors (Qdrant)", key="btn_index_vectors", use_container_width=True):
+                with st.spinner("Generating embeddings & updating Qdrant collection..."):
+                    try:
+                        res = api_client.index_vectors(int(active_repo_id))
+                        st.success("Vector indexing complete!")
+                        st.json(res)
+                        invalidate_repositories_cache()
+                        sync_repositories(api_client, force_refresh=True)
+                    except Exception as exc:
+                        st.error(f"Vector indexing error: {exc}")
 
     st.divider()
 
@@ -266,7 +240,7 @@ def render_repository_view(api_client: ApiClient) -> None:
     with st.form("scan_repo_form"):
         scan_url = st.text_input(
             "Repository URL to scan:",
-            value=st.session_state.get("selected_repo", {}).get("url", ""),
+            value=st.session_state.get("selected_repo", {}).get("url", "") if isinstance(st.session_state.get("selected_repo"), dict) else "",
             placeholder="https://github.com/owner/repository",
         )
         submit_scan = st.form_submit_button("Run Architecture Scan")

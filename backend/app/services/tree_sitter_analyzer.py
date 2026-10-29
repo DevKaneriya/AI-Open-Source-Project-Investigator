@@ -5,6 +5,9 @@ import re
 
 
 from tree_sitter_language_pack import get_parser
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -90,33 +93,29 @@ class TreeSitterAnalyzer:
 
 
 
-        parser = get_parser(language)
-
-
-
-        # Tree-sitter byte offsets are based on UTF-8 bytes.
-
-        source_bytes = source_code.encode("utf-8")
-
-
-
-        tree = parser.parse(source_bytes)
-
-
-
-        return self._analyze_javascript_typescript(
-
-            tree.root_node,
-
-            source_code,
-
-            source_bytes,
-
-            file_path,
-
-            language,
-
-        )
+        try:
+            parser = get_parser(language)
+            source_bytes = source_code.encode("utf-8")
+            tree = parser.parse(source_bytes)
+            return self._analyze_javascript_typescript(
+                tree.root_node,
+                source_code,
+                source_bytes,
+                file_path,
+                language,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to parse %s with tree-sitter (%s): %s",
+                file_path, language, exc,
+            )
+            return {
+                "file": file_path,
+                "language": language,
+                "functions": [],
+                "classes": [],
+                "imports": [],
+            }
 
 
 

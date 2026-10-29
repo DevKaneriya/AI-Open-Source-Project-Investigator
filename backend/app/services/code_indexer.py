@@ -12,6 +12,10 @@ from backend.app.services.language_service import LanguageService
 from backend.app.services.tree_sitter_analyzer import TreeSitterAnalyzer
 from backend.app.services.file_filter_service import should_include_file
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 class CodeIndexer:
     def __init__(self):
         self.python_analyzer = CodeAnalyzer()
@@ -56,7 +60,18 @@ class CodeIndexer:
                 indexed_symbols += symbols_count
                 indexed_calls += calls_count
 
-            except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
+            except (SyntaxError, UnicodeDecodeError, OSError, ValueError) as exc:
+                logger.debug("Skipping %s: %s", file_path, exc)
+                unsupported_files += 1
+                continue
+            except Exception as exc:
+                # Catch tree-sitter download/load errors and any other
+                # unexpected per-file failures so they don't crash the
+                # entire indexing job.
+                logger.warning(
+                    "Unexpected error indexing %s (%s): %s",
+                    file_path, type(exc).__name__, exc,
+                )
                 unsupported_files += 1
                 continue
 

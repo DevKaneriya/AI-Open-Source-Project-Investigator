@@ -6,7 +6,9 @@ grounded answer presentation, limitations, and execution diagnostics.
 from __future__ import annotations
 
 import streamlit as st
+import time
 from typing import Any
+from frontend.utils.history_manager import save_history_entry, load_history
 from frontend.api_client import (
     ApiClient,
     BackendConnectionError,
@@ -16,6 +18,7 @@ from frontend.api_client import (
     ApiClientError,
 )
 from frontend.components.evidence_view import render_evidence_citations
+from frontend.utils.repo_manager import validate_selected_repository
 from frontend.utils.formatting import (
     get_confidence_badge_html,
     format_execution_time,
@@ -48,18 +51,17 @@ def render_investigation_view(api_client: ApiClient) -> None:
         unsafe_allow_html=True,
     )
 
-    selected_repo = st.session_state.get("selected_repo", {})
-    repo_id = selected_repo.get("id") or st.session_state.get("selected_repo_id")
-    repo_name = (
-        selected_repo.get("name") or f"Repository #{repo_id}" if repo_id else None
-    )
-    repo_url = selected_repo.get("url")
+    selected_repo = st.session_state.get("selected_repo")
+    repo_id = selected_repo.get("id") if isinstance(selected_repo, dict) else st.session_state.get("selected_repo_id")
+    repo_name = selected_repo.get("name") if isinstance(selected_repo, dict) else (f"Repository #{repo_id}" if repo_id else None)
+    repo_url = selected_repo.get("url") if isinstance(selected_repo, dict) else None
 
     # Guard: require repository selection
-    if not repo_id:
+    if not repo_id or not selected_repo:
         st.warning(
             "**No repository selected.** Select or configure a repository in the sidebar, "
-            "or visit the **Repositories** tab.",
+            "or visit the **Repositories** tab to register a codebase.",
+            icon="⚠️",
         )
         return
 
@@ -97,9 +99,42 @@ def render_investigation_view(api_client: ApiClient) -> None:
                 help="Click to populate this question",
             ):
                 st.session_state["query_input_text"] = example
+                st.session_state["query_input_area"] = example
                 st.rerun()
 
+    # ── Recent queries quick access ───────────────────────────────────────────
+    recent_history = load_history()
+    if recent_history:
+        st.markdown(
+            '<p style="font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:#6e7681; margin:10px 0 6px 0;">Recent queries</p>',
+            unsafe_allow_html=True,
+        )
+        recent_display = recent_history[:4]
+        recent_cols = st.columns(len(recent_display), gap="small")
+        for i, hist_item in enumerate(recent_display):
+            rq = hist_item.get("query", "")
+            short_rq = (rq[:36] + "…") if len(rq) > 36 else rq
+            with recent_cols[i]:
+                if st.button(
+                    f"🕒 {short_rq}",
+                    key=f"recent_chip_{i}",
+                    use_container_width=True,
+                    help=f"Reload investigation:\n{rq}\nRepo: {hist_item.get('repository_name', '')}",
+                ):
+                    st.session_state["latest_investigation"] = hist_item.get("response")
+                    st.session_state["query_input_text"] = rq
+                    st.session_state["query_input_area"] = rq
+                    st.session_state["selected_repo_id"] = hist_item.get("repository_id")
+                    st.rerun()
+
     # ── Query input ────────────────────────────────────────────────────────────
+    # If the previous investigation requested a clear, reset the query box keys
+    # here BEFORE the text_area widget is instantiated. Streamlit forbids
+    # modifying a widget's session-state key after that widget is created in
+    # the same run, so the clear must happen prior to creating the text_area.
+    if st.session_state.pop("clear_query", False):
+        st.session_state["query_input_text"] = ""
+        st.session_state["query_input_area"] = ""
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     query_text = st.text_area(
         label="Investigation query",
@@ -130,23 +165,36 @@ def render_investigation_view(api_client: ApiClient) -> None:
         if not query_text or not query_text.strip():
             st.error("Please enter a question before running an investigation.")
         else:
+            # Task 6: Validate selected repository against latest backend state before submitting
+            verified_repo, val_err = validate_selected_repository(api_client)
+            if val_err or not verified_repo:
+                st.error(
+                    f"❌ **Repository Validation Error:** {val_err or 'Repository not found on backend.'}\n\n"
+                    "The selected repository is no longer available in the database. "
+                    "Please select an active repository or register one.",
+                    icon="❌",
+                )
+                return
+
+            # Task 10: Ensure displayed name and ID sent to endpoint come from the same current record
+            target_repo_id = verified_repo["id"]
+            target_repo_name = verified_repo.get("name") or f"Repository #{target_repo_id}"
+
             st.session_state["is_investigating"] = True
-            st.session_state["query_input_text"] = query_text
             try:
                 with st.spinner("Running multi-node investigation…"):
                     result = api_client.investigate(
-                        repository_id=int(repo_id),
+                        repository_id=int(target_repo_id),
                         query=query_text.strip(),
                     )
                 st.session_state["latest_investigation"] = result
                 st.session_state["last_investigated_query"] = query_text.strip()
 
-                history = st.session_state.setdefault("investigation_history", [])
                 history_entry = {
-                    "repository_id": repo_id,
-                    "repository_name": repo_name,
+                    "repository_id": target_repo_id,
+                    "repository_name": target_repo_name,
                     "query": query_text.strip(),
-                    "timestamp": result.get("metadata", {}).get("timestamp"),
+                    "timestamp": result.get("metadata", {}).get("timestamp") or time.time(),
                     "confidence": (
                         result.get("investigation", {}).get("confidence")
                         if isinstance(result.get("investigation"), dict)
@@ -154,7 +202,13 @@ def render_investigation_view(api_client: ApiClient) -> None:
                     ),
                     "response": result,
                 }
-                st.session_state["investigation_history"] = [history_entry] + history[:19]
+                save_history_entry(history_entry)
+                st.session_state["is_investigating"] = False
+                # Defer clearing the query box to the next run: the text_area
+                # widget (key="query_input_area") was already instantiated
+                # earlier in this run, so its key can't be modified here.
+                st.session_state["clear_query"] = True
+                st.rerun()
 
             except BackendConnectionError as exc:
                 st.error(f"🔌 **Backend Connection Error:** {exc}")

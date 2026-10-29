@@ -193,6 +193,12 @@ class ApiClient:
             return resp
         return []
 
+    def delete_repository(self, repository_id: int) -> dict[str, Any]:
+        """
+        Delete a repository and its indexed artifacts via DELETE /repositories/{id}.
+        """
+        return self._request("DELETE", f"/repositories/{repository_id}", timeout=10.0)
+
     def add_repository(self, repository_url: str) -> dict[str, Any]:
         """
         Register and clone a GitHub repository via POST /repositories.
