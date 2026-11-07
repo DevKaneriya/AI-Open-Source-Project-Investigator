@@ -9,9 +9,11 @@ by validating that all claims are supported by the provided code snippets.
 """
 
 import logging
+import re
 from typing import Any
 
 from backend.app.services.llm_service import LLMService
+from backend.app.services.citation_validation_service import normalize_citation_markers
 from backend.app.models.investigation_answer import InvestigationAnswer, Citation
 
 
@@ -87,12 +89,26 @@ class AnswerGenerationService:
             
             logger.info(f"Generating answer for question type: {question_type} with max_tokens: {max_tokens}")
             
-            llm_response = self.llm_service.generate_structured(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                response_schema=response_schema,
-                max_tokens=max_tokens,  # Pass question-type-specific budget
-            )
+            try:
+                llm_response = self.llm_service.generate_structured(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    response_schema=response_schema,
+                    max_tokens=max_tokens,  # Pass question-type-specific budget
+                )
+            except RuntimeError as e:
+                # Malformed or empty model output is transient; retry once.
+                # API/configuration errors are not retried.
+                message = str(e).lower()
+                if "parse" not in message and "empty response" not in message:
+                    raise
+                logger.warning(f"Retrying answer generation after malformed LLM output: {e}")
+                llm_response = self.llm_service.generate_structured(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    response_schema=response_schema,
+                    max_tokens=max_tokens,
+                )
             
             # Validate and construct answer with full citations
             answer = self._validate_and_construct_answer(
@@ -120,8 +136,9 @@ class AnswerGenerationService:
         if not question_type:
             return 1500
         
-        # Simple questions: concise answers
-        if question_type in ('symbol_lookup', 'call_site_lookup', 'file_explanation'):
+        # Simple questions: concise answers. Call-site answers list several
+        # callers with citations and were truncated mid-JSON at 1200.
+        if question_type in ('symbol_lookup', 'file_explanation'):
             return 1200
         
         # Complex multi-step questions: detailed explanations
@@ -147,7 +164,11 @@ class AnswerGenerationService:
         prepared = []
         seen_locations = set()
         evidence_id = 1
-        
+        # IDs already assigned by the investigation's evidence registry are
+        # canonical and must be preserved; renumbering here would make [E3]
+        # in the answer point at a different registry item than E3.
+        used_ids = {item.get('evidence_id') for item in evidence if item.get('evidence_id')}
+
         for item in evidence[:self.MAX_EVIDENCE_ITEMS * 2]:  # Scan more to account for filtering
             # Validate required fields
             file_path = item.get('file')
@@ -187,8 +208,15 @@ class AnswerGenerationService:
             if len(snippet) > self.MAX_SNIPPET_LENGTH:
                 snippet = snippet[:self.MAX_SNIPPET_LENGTH] + "\n... (truncated)"
             
+            assigned_id = item.get('evidence_id')
+            if not assigned_id:
+                while f'E{evidence_id}' in used_ids:
+                    evidence_id += 1
+                assigned_id = f'E{evidence_id}'
+                used_ids.add(assigned_id)
+
             prepared_item = {
-                'evidence_id': f'E{evidence_id}',  # Stable ID for citations
+                'evidence_id': assigned_id,  # Stable ID for citations
                 'file': file_path,
                 'start_line': start_line,
                 'end_line': end_line,
@@ -202,8 +230,7 @@ class AnswerGenerationService:
             prepared_item = {k: v for k, v in prepared_item.items() if v is not None and k != 'evidence_id' or k == 'evidence_id'}
             
             prepared.append(prepared_item)
-            evidence_id += 1
-            
+
             # Stop once we have enough valid evidence
             if len(prepared) >= self.MAX_EVIDENCE_ITEMS:
                 break
@@ -234,7 +261,11 @@ EVIDENCE GROUNDING RULES:
 7. Do NOT use documentation files to support claims about executable behavior unless you identify them as documentation
 8. Do NOT use .env.example files to claim what values are active at runtime
 9. If evidence is truncated (marked with "truncated"), do NOT claim the omitted code is confirmed
-10. Do NOT claim a database write, payment status update, email dispatch, or UI action unless the relevant implementation is visible in evidence
+10. Do NOT claim a database write, UI action, or that X calls Y unless that code/call site is visible in evidence
+11. Name a database engine only if configuration evidence shows it. With only ORM code, SQL must be labelled "illustrative SQL (inferred)"
+12. localStorage/sessionStorage is client state, not database persistence; admin, test and migration files are not runtime behaviour
+13. Do not describe a handler as doing an operation its name/docstring/route does not show
+14. Mark inferences "(inferred)". Every factual sentence, list item and code block needs its own [E#]; code blocks must be verbatim excerpts
 
 ABSENCE AND UNCERTAINTY:
 - "Not found in retrieved evidence" ≠ "does not exist in repository"
@@ -250,18 +281,10 @@ CITATION REQUIREMENTS:
 4. You do NOT need to provide file paths, line numbers, or snippets in the response - these are added automatically
 5. Focus on writing a complete, well-structured answer with inline [E1], [E2] references
 
-ANSWER STRUCTURE:
-1. Write complete, well-formed sentences and paragraphs
-2. Include inline evidence references [E1], [E2] within your answer text  
-3. Organize information logically (overview → details → flow)
-4. Complete all code examples and explanations - NEVER stop mid-sentence
-5. If approaching length limits, prioritize completing your current thought
-
-ANSWER QUALITY:
-1. Write clear, technical explanations suitable for developers
-2. Focus on what the code actually does, not what it might do
-3. Avoid unnecessary repetition
-4. Be concise but complete - finish your explanation properly
+ANSWER STRUCTURE AND QUALITY:
+1. Clear, technical, well-formed paragraphs for developers, organized overview → details → flow
+2. Focus on what the code actually does; avoid repetition
+3. Be concise but complete - NEVER stop mid-sentence or mid-code-block
 
 CONFIDENCE ASSESSMENT:
 - Set confidence to "high" only when evidence fully answers the question
@@ -269,10 +292,8 @@ CONFIDENCE ASSESSMENT:
 - Set confidence to "insufficient" when evidence cannot support a reliable answer
 
 HANDLING GAPS:
-- If a complete execution path cannot be established, identify the missing connections in limitations
-- If evidence conflicts, explain the conflict in limitations
-- Never assume two components are connected just because both appear in evidence
-- List specific missing information in the limitations array"""
+- List missing connections, conflicts and missing information in limitations
+- Never assume two components are connected just because both appear in evidence"""
 
         if evaluation_context:
             missing_stages = evaluation_context.get("missing_stages", [])
@@ -284,11 +305,23 @@ HANDLING GAPS:
                 if unverified_conns:
                     prompt += f"- UNVERIFIED CONNECTIONS: {'; '.join(unverified_conns)}. You MUST NOT assume or assert these connections exist.\n"
                 prompt += (
-                    "- CRITICAL: If a guest-cart merge endpoint (such as CartSyncView) appears in evidence, "
-                    "do NOT describe it as the normal quantity-update endpoint unless evidence directly proves "
-                    "the UI or URL route calls it for normal quantity updates.\n"
+                    "- Describe only the verified parts of the flow; for each missing stage say precisely what was "
+                    "found and what remains unverified. Do not speculate about missing handlers or API calls.\n"
                     "- When required stages or connections are missing, confidence MUST NOT be 'high'. Set confidence "
                     "to 'partial' or 'insufficient' and document all gaps in the limitations array.\n"
+                )
+            facts = [
+                f"{stage['stage']}: {stage['details']}"
+                for stage in evaluation_context.get("flow_stages", [])
+                if stage.get("present")
+            ][:7] + list(evaluation_context.get("grounding_notes", []))[:6]
+            if facts:
+                prompt += "\n\nEVIDENCE FACTS (deterministically verified from the code):\n"
+                prompt += "\n".join(f"- {fact[:1200]}" for fact in facts)
+                prompt += (
+                    "\n- Call a list complete/exhaustive, or say something does not exist in the repository, ONLY "
+                    "when a fact above says the repository-wide search was complete; otherwise say \"in the "
+                    "retrieved evidence\"."
                 )
 
         if question_type:
@@ -304,7 +337,7 @@ HANDLING GAPS:
         guidance_map = {
             'symbol_lookup': "Focus on precisely locating the symbol and explaining its definition. Include file path, line numbers, and signature. If the symbol is not found in the evidence, explicitly state that it was not found in the retrieved evidence rather than claiming it does not exist anywhere in the repository. Only claim repository-wide absence if the search covered all indexed files.",
             'feature_flow': "Trace the implementation across relevant files and functions. Follow the execution path from entry point through service methods to database operations. Use call relationships when available to identify connected code. Identify entry points, key operations, and data flow. Explicitly note any gaps in the call chain or missing implementation steps. Do not assume components are connected without evidence of calls, imports, or route mappings.",
-            'architectural_overview': "Explain the overall structure using README, entry points, configuration, and key architectural files. Describe main components and their responsibilities.",
+            'architectural_overview': "Explain the overall structure using README, entry points, configuration, routing, and key architectural files. Describe main components and their responsibilities. State each file's actual role (e.g. manage.py is Django's command-line utility, not the backend architecture; a UI component is not the application entry point unless it bootstraps the app). Only describe frontend-backend communication, authentication, and the database engine when evidence shows them.",
             'cross_cutting_concern': "Focus on how the concern is implemented across the codebase. Look for configuration, middleware, decorators, and common patterns.",
             'end_to_end_flow': "Trace the complete path from user action to data persistence. Identify: (1) frontend event handler and component, (2) service method if any, (3) HTTP request with exact endpoint, (4) backend route and view handler, (5) database models and write operations, (6) any payment/webhook/notification handlers. Use relationships and imports to connect these steps. Explicitly state which links are missing or cannot be verified from the evidence.",
             'call_site_lookup': "Identify where the symbol is called/used. Show calling context and usage patterns.",
@@ -407,8 +440,9 @@ HANDLING GAPS:
         metadata = llm_response.pop('__llm_metadata__', llm_response.pop('_metadata', {}))
         was_truncated = metadata.get('was_truncated', False)
         
-        # Extract fields with defaults
-        answer_text = llm_response.get('answer', '')
+        # Extract fields with defaults; citation variants like "(E3)" are
+        # rewritten to the canonical "[E3]" form before citations are built.
+        answer_text = normalize_citation_markers(llm_response.get('answer', ''))
         cited_evidence_ids = llm_response.get('cited_evidence_ids', [])
         confidence = llm_response.get('confidence', 'insufficient')
         limitations = llm_response.get('limitations', [])
@@ -426,7 +460,11 @@ HANDLING GAPS:
             if confidence == 'high':
                 confidence = 'partial'
         
-        # Reconstruct full citations from evidence IDs
+        # Reconstruct full citations server-side from the evidence registry.
+        # The citation list mirrors the inline [E#] references exactly; the
+        # declared list is only used when the answer has no inline references.
+        inline_ids = list(dict.fromkeys(re.findall(r"\[(E\d+)\]", answer_text)))
+        cited_evidence_ids = inline_ids or list(dict.fromkeys(cited_evidence_ids or []))
         citations = self._reconstruct_citations(cited_evidence_ids, supplied_evidence, answer_text)
         
         # Adjust confidence if citations seem weak (but allow concise answers to be high confidence)
@@ -450,7 +488,16 @@ HANDLING GAPS:
                     msg = f"Unverified connection: {conn}"
                     if not any(conn[:30] in str(lim) for lim in limitations):
                         limitations = list(limitations) + [msg]
-        
+            # The answer may not claim more than the evaluation verified, even
+            # when an LLM-evaluated profile reports no named stages.
+            sufficiency = evaluation_context.get("sufficiency")
+            if sufficiency and sufficiency != "sufficient" and confidence == 'high':
+                logger.info("Downgrading confidence from 'high' to 'partial': evidence evaluation is %s", sufficiency)
+                confidence = 'partial'
+                msg = f"Evidence evaluation: {sufficiency.replace('_', ' ')}; not every requested aspect is verified."
+                if msg not in limitations:
+                    limitations = list(limitations) + [msg]
+
         return InvestigationAnswer(
             question=question,
             answer=answer_text,

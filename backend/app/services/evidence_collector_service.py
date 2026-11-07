@@ -1,6 +1,7 @@
 import re
 from collections import defaultdict
 from backend.app.models.query_analysis import QuestionType
+from backend.app.services import evidence_signals
 
 
 class EvidenceCollectorService:
@@ -16,7 +17,8 @@ class EvidenceCollectorService:
     """
 
     DEFAULT_MAX_EVIDENCE = 12
-    
+    TRAVERSAL_BONUS = 0.25
+
     # Architectural file type bonuses
     ARCHITECTURAL_FILE_BONUSES = {
         "readme": 0.30,
@@ -152,6 +154,20 @@ class EvidenceCollectorService:
                             1.50,  # Cap maximum score
                             candidate["evidence_score"] + arch_bonus
                         )
+
+            # Runtime questions must prefer implementation code over admin
+            # registrations, tests, migrations, generated files and docs.
+            for candidate in merged:
+                penalty = self._indirect_file_penalty(
+                    candidate.get("file", ""),
+                    question_type,
+                    query,
+                )
+                if penalty:
+                    candidate["evidence_score"] = round(
+                        max(0.0, candidate["evidence_score"] - penalty),
+                        6,
+                    )
 
             ranked = sorted(
                 merged,
@@ -302,8 +318,14 @@ class EvidenceCollectorService:
             candidate["query_match_score"] = query_bonus
             candidate["exact_identifier_match"] = exact_match
 
+            # Evidence reached by following a concrete code relationship
+            # (route -> handler, method -> caller) outranks keyword hits.
+            traversal_bonus = (
+                self.TRAVERSAL_BONUS if result.get("traversal") else 0.0
+            )
+
             candidate["evidence_score"] = round(
-                min(1.35, base_score + query_bonus),
+                min(1.35, base_score + query_bonus + traversal_bonus),
                 6,
             )
 
@@ -740,9 +762,41 @@ class EvidenceCollectorService:
             return 0.0
 
     # ---------------------------------------------------------
+    # INDIRECT FILE DEMOTION
+    # ---------------------------------------------------------
+
+    INDIRECT_FILE_PENALTY = 0.35
+
+    @classmethod
+    def _indirect_file_penalty(
+        cls,
+        file_path: str,
+        question_type: QuestionType | None,
+        query: str,
+    ) -> float:
+        role = evidence_signals.file_role(file_path)
+
+        if role not in evidence_signals.INDIRECT_ROLES:
+            return 0.0
+
+        # The user explicitly asked about this kind of file.
+        query_lower = (query or "").lower()
+        if role in query_lower or (role == "test" and "tests" in query_lower):
+            return 0.0
+
+        # READMEs and docs are legitimate evidence for overview questions.
+        if role == evidence_signals.ROLE_DOCUMENTATION and question_type in (
+            QuestionType.ARCHITECTURAL_OVERVIEW,
+            QuestionType.DEPENDENCY_ANALYSIS,
+        ):
+            return 0.0
+
+        return cls.INDIRECT_FILE_PENALTY
+
+    # ---------------------------------------------------------
     # ARCHITECTURAL AWARENESS
     # ---------------------------------------------------------
-    
+
     def _get_architectural_bonus(
         self,
         file_path: str,

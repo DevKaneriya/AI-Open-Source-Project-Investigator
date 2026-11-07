@@ -5,10 +5,13 @@ grounded answer presentation, limitations, and execution diagnostics.
 
 from __future__ import annotations
 
-import streamlit as st
+import html
 import time
 from typing import Any
-from frontend.utils.history_manager import save_history_entry, load_history
+
+import streamlit as st
+
+from frontend.utils.history_manager import save_history_entry
 from frontend.api_client import (
     ApiClient,
     BackendConnectionError,
@@ -18,214 +21,219 @@ from frontend.api_client import (
     ApiClientError,
 )
 from frontend.components.evidence_view import render_evidence_citations
-from frontend.utils.repo_manager import validate_selected_repository
+from frontend.utils.navigation import flash, go, show_flash, select_repository
+from frontend.utils.pipeline import (
+    OUTDATED_BACKEND_MESSAGE,
+    is_ready,
+    run_pipeline,
+    stage_chip_html,
+    stage_label,
+    stage_unknown,
+)
+from frontend.utils.repo_manager import validate_selected_repository, invalidate_repositories_cache, sync_repositories
 from frontend.utils.formatting import (
     get_confidence_badge_html,
     format_execution_time,
-    format_timestamp,
 )
 
 EXAMPLE_QUESTIONS = [
-    "Explain the CartItem model and its fields.",
-    "Trace an authenticated cart update from frontend to database.",
+    "Give me an overview of the architecture",
     "Where is authentication handled?",
-    "How is product data retrieved and cached?",
-    "What calls this function and what does it depend on?",
+    "What are the main API endpoints?",
+    "Which data models exist?",
+    "Which frameworks and versions are used?",
+    "Trace a request from the frontend to the database",
 ]
 
+QUERY_KEY = "query_input_area"
+EXAMPLE_KEY = "example_pills"
 
-def render_investigation_view(api_client: ApiClient) -> None:
-    """Render the primary investigation workspace."""
 
-    # ── Page header ────────────────────────────────────────────────────────────
-    st.markdown(
+def _use_example() -> None:
+    choice = st.session_state.get(EXAMPLE_KEY)
+    if choice:
+        st.session_state[QUERY_KEY] = choice
+    st.session_state[EXAMPLE_KEY] = None
+
+
+def _page_header() -> None:
+    st.html(
         """
-        <div style="margin-bottom: 4px;">
-            <h2 style="margin:0; color:#e6edf3;">🔎 Repository Investigation</h2>
-            <p style="margin:4px 0 0 0; color:#8b949e; font-size:0.9rem;">
-                Ask natural-language questions. The LangGraph engine retrieves, evaluates,
-                and cites verified repository source evidence.
-            </p>
+        <div class="oi-page-header">
+            <span class="oi-eyebrow">Investigate</span>
+            <h1>Ask about the code</h1>
+            <p>Ask a question in plain English. The answer is built from verified source
+            snippets, and every claim cites where it came from.</p>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
-    selected_repo = st.session_state.get("selected_repo")
-    repo_id = selected_repo.get("id") if isinstance(selected_repo, dict) else st.session_state.get("selected_repo_id")
-    repo_name = selected_repo.get("name") if isinstance(selected_repo, dict) else (f"Repository #{repo_id}" if repo_id else None)
-    repo_url = selected_repo.get("url") if isinstance(selected_repo, dict) else None
 
-    # Guard: require repository selection
-    if not repo_id or not selected_repo:
-        st.warning(
-            "**No repository selected.** Select or configure a repository in the sidebar, "
-            "or visit the **Repositories** tab to register a codebase.",
-            icon="⚠️",
+def _render_empty_state(repo_error: str | None) -> None:
+    with st.container(border=True):
+        if repo_error:
+            st.markdown("#### The backend isn't reachable")
+            st.markdown(
+                "Start the API server with `.\\start_server.ps1` from the project folder, then refresh this page."
+            )
+            if st.button("Open system status", type="primary", icon=":material/monitor_heart:"):
+                go("status")
+        else:
+            st.markdown("#### Add a repository to get started")
+            st.markdown(
+                "You need at least one indexed repository before you can ask questions. "
+                "It takes one step: paste a GitHub URL and the app clones and indexes it for you."
+            )
+            with st.container(horizontal=True, gap="small"):
+                if st.button("Add a repository", type="primary", icon=":material/add:"):
+                    go("repositories")
+                if st.button("Read the guide", icon=":material/rocket_launch:"):
+                    go("guide")
+
+
+def _render_target_banner(api_client: ApiClient, repo: dict[str, Any]) -> None:
+    name = repo.get("name") or f"Repository #{repo.get('id')}"
+    url = repo.get("url") or ""
+    link = (
+        f'<a href="{html.escape(url)}" target="_blank" rel="noopener">View on GitHub ↗</a>'
+        if url.startswith("http") else ""
+    )
+    with st.container(border=True):
+        st.html(
+            f"""
+            <div class="oi-repo-head">
+                <div class="oi-repo-head__name"><span class="oi-muted" style="font-weight:500">Repository</span>
+                <span class="oi-truncate">{html.escape(name)}</span>{stage_chip_html(repo)}</div>
+                {link}
+            </div>
+            """
+        )
+        st.caption("Switch repositories from the sidebar.")
+
+    if is_ready(repo):
+        return
+    if stage_unknown(repo):
+        st.warning(OUTDATED_BACKEND_MESSAGE, icon=":material/update:")
+        return
+
+    ready_other = next(
+        (r for r in st.session_state.get("repositories", []) if is_ready(r) and r.get("id") != repo.get("id")),
+        None,
+    )
+    st.html(
+        f"""
+        <div class="oi-callout oi-callout--warn">
+            <strong>{html.escape(name)} isn't fully indexed yet</strong> (current step: {html.escape(stage_label(repo))}).
+            Answers will be incomplete or empty until indexing finishes.
+        </div>
+        """
+    )
+    with st.container(horizontal=True, gap="small"):
+        run = st.button("Finish indexing now", type="primary", icon=":material/play_arrow:", key="inv_finish_index")
+        if ready_other and st.button(f"Use {ready_other.get('name')} instead", key="inv_use_ready"):
+            select_repository(ready_other)
+            st.rerun()
+    if run:
+        ok, fresh, message = run_pipeline(api_client, repo)
+        invalidate_repositories_cache()
+        sync_repositories(api_client, force_refresh=True)
+        if ok:
+            flash("success", message)
+            st.rerun()
+
+
+def _run_investigation(api_client: ApiClient, query: str) -> None:
+    verified_repo, val_err = validate_selected_repository(api_client)
+    if val_err or not verified_repo:
+        st.error(
+            f"**The selected repository is no longer available.** {val_err or ''}\n\n"
+            "Pick another repository in the sidebar or add one on the Repositories page."
         )
         return
 
-    # ── Active-target banner ───────────────────────────────────────────────────
-    st.markdown(
-        f"""
-        <div style="
-            display:flex; align-items:center; justify-content:space-between;
-            background:#161b22; border:1px solid #21262d; border-radius:8px;
-            padding:10px 16px; margin: 12px 0 16px 0; gap: 12px;
-        ">
-            <div style="font-size:0.88rem; color:#c9d1d9; min-width:0;">
-                <span style="color:#6e7681;">Active target: </span>
-                <code style="color:#58a6ff; background:transparent; padding:0;">{repo_name}</code>
-                <span style="color:#6e7681; margin-left:8px;">ID&nbsp;{repo_id}</span>
-            </div>
-            {"<a href='" + repo_url + "' target='_blank' style='font-size:0.8rem; color:#58a6ff; text-decoration:none; white-space:nowrap; flex-shrink:0;'>↗ GitHub</a>" if repo_url else ""}
-        </div>
-        """,
-        unsafe_allow_html=True,
+    target_repo_id = verified_repo["id"]
+    target_repo_name = verified_repo.get("name") or f"Repository #{target_repo_id}"
+
+    try:
+        with st.spinner("Investigating: analysing the question, retrieving evidence and verifying citations…"):
+            result = api_client.investigate(repository_id=int(target_repo_id), query=query)
+    except BackendConnectionError as exc:
+        st.error(f"**Backend connection error.** {exc}")
+        return
+    except BackendTimeoutError as exc:
+        st.error(f"**The investigation timed out.** {exc} Try a narrower question.")
+        return
+    except RepositoryNotFoundError as exc:
+        st.error(f"**Repository not found.** {exc}")
+        return
+    except InvestigationError as exc:
+        st.error(f"**Investigation failed.** {exc.message}")
+        return
+    except ApiClientError as exc:
+        st.error(f"**API error.** {exc.message}")
+        return
+
+    st.session_state["latest_investigation"] = result
+    investigation = result.get("investigation")
+    save_history_entry(
+        {
+            "repository_id": target_repo_id,
+            "repository_name": target_repo_name,
+            "query": query,
+            "timestamp": result.get("metadata", {}).get("timestamp") or time.time(),
+            "confidence": investigation.get("confidence") if isinstance(investigation, dict) else "unknown",
+            "response": result,
+        }
     )
+    # The text area was already rendered this run, so clear it on the next one.
+    st.session_state["clear_query"] = True
+    st.rerun()
 
-    # ── Suggested queries ──────────────────────────────────────────────────────
-    st.markdown(
-        '<p style="font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:#6e7681; margin-bottom:6px;">Suggested queries</p>',
-        unsafe_allow_html=True,
-    )
-    example_cols = st.columns(len(EXAMPLE_QUESTIONS), gap="small")
-    for i, example in enumerate(EXAMPLE_QUESTIONS):
-        with example_cols[i]:
-            if st.button(
-                example,
-                key=f"ex_btn_{i}",
-                use_container_width=True,
-                help="Click to populate this question",
-            ):
-                st.session_state["query_input_text"] = example
-                st.session_state["query_input_area"] = example
-                st.rerun()
 
-    # ── Recent queries quick access ───────────────────────────────────────────
-    recent_history = load_history()
-    if recent_history:
-        st.markdown(
-            '<p style="font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:#6e7681; margin:10px 0 6px 0;">Recent queries</p>',
-            unsafe_allow_html=True,
-        )
-        recent_display = recent_history[:4]
-        recent_cols = st.columns(len(recent_display), gap="small")
-        for i, hist_item in enumerate(recent_display):
-            rq = hist_item.get("query", "")
-            short_rq = (rq[:36] + "…") if len(rq) > 36 else rq
-            with recent_cols[i]:
-                if st.button(
-                    f"🕒 {short_rq}",
-                    key=f"recent_chip_{i}",
-                    use_container_width=True,
-                    help=f"Reload investigation:\n{rq}\nRepo: {hist_item.get('repository_name', '')}",
-                ):
-                    st.session_state["latest_investigation"] = hist_item.get("response")
-                    st.session_state["query_input_text"] = rq
-                    st.session_state["query_input_area"] = rq
-                    st.session_state["selected_repo_id"] = hist_item.get("repository_id")
-                    st.rerun()
+def render_investigation_view(api_client: ApiClient) -> None:
+    show_flash()
+    _page_header()
 
-    # ── Query input ────────────────────────────────────────────────────────────
-    # If the previous investigation requested a clear, reset the query box keys
-    # here BEFORE the text_area widget is instantiated. Streamlit forbids
-    # modifying a widget's session-state key after that widget is created in
-    # the same run, so the clear must happen prior to creating the text_area.
+    repos = st.session_state.get("repositories", [])
+    selected_repo = st.session_state.get("selected_repo")
+    if not repos or not isinstance(selected_repo, dict):
+        _render_empty_state(st.session_state.get("repositories_error"))
+        return
+
+    _render_target_banner(api_client, selected_repo)
+
+    # Apply deferred query updates before the text area is created; Streamlit
+    # forbids changing a widget's key after it is instantiated in a run.
     if st.session_state.pop("clear_query", False):
-        st.session_state["query_input_text"] = ""
-        st.session_state["query_input_area"] = ""
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-    query_text = st.text_area(
-        label="Investigation query",
-        value=st.session_state.get("query_input_text", ""),
-        key="query_input_area",
-        placeholder="e.g. Trace an authenticated cart update from the frontend to the database.",
-        height=90,
-        help="Be specific about functions, flows, models, or behaviors to investigate.",
-        label_visibility="collapsed",
+        st.session_state[QUERY_KEY] = ""
+    pending = st.session_state.pop("pending_query", None)
+    if pending is not None:
+        st.session_state[QUERY_KEY] = pending
+    st.session_state.setdefault(QUERY_KEY, "")
+
+    st.pills(
+        "Try an example",
+        EXAMPLE_QUESTIONS,
+        key=EXAMPLE_KEY,
+        on_change=_use_example,
     )
 
-    col_btn, col_hint = st.columns([1, 5], gap="small")
-    with col_btn:
-        investigate_clicked = st.button(
-            "🚀 Investigate",
-            type="primary",
-            use_container_width=True,
-            disabled=st.session_state.get("is_investigating", False),
+    # A text input (not a text area) so Enter submits the form.
+    with st.form("investigate_form", border=False):
+        query_text = st.text_input(
+            "Your question",
+            key=QUERY_KEY,
+            placeholder="e.g. How does the checkout flow work from the UI to the database?",
+            help="Name the functions, classes, files or flows you care about for the most precise answers.",
         )
-    with col_hint:
-        st.markdown(
-            '<p style="font-size:0.78rem; color:#6e7681; margin:8px 0 0 4px;">Powered by LangGraph · Analysis → Retrieval → Evaluation → Answer → Citation Validation</p>',
-            unsafe_allow_html=True,
-        )
+        submitted = st.form_submit_button("Investigate", type="primary", icon=":material/search:")
 
-    # ── Run investigation ──────────────────────────────────────────────────────
-    if investigate_clicked:
+    if submitted:
         if not query_text or not query_text.strip():
-            st.error("Please enter a question before running an investigation.")
+            st.warning("Type a question first, or pick one of the examples above.")
         else:
-            # Task 6: Validate selected repository against latest backend state before submitting
-            verified_repo, val_err = validate_selected_repository(api_client)
-            if val_err or not verified_repo:
-                st.error(
-                    f"❌ **Repository Validation Error:** {val_err or 'Repository not found on backend.'}\n\n"
-                    "The selected repository is no longer available in the database. "
-                    "Please select an active repository or register one.",
-                    icon="❌",
-                )
-                return
+            _run_investigation(api_client, query_text.strip())
 
-            # Task 10: Ensure displayed name and ID sent to endpoint come from the same current record
-            target_repo_id = verified_repo["id"]
-            target_repo_name = verified_repo.get("name") or f"Repository #{target_repo_id}"
-
-            st.session_state["is_investigating"] = True
-            try:
-                with st.spinner("Running multi-node investigation…"):
-                    result = api_client.investigate(
-                        repository_id=int(target_repo_id),
-                        query=query_text.strip(),
-                    )
-                st.session_state["latest_investigation"] = result
-                st.session_state["last_investigated_query"] = query_text.strip()
-
-                history_entry = {
-                    "repository_id": target_repo_id,
-                    "repository_name": target_repo_name,
-                    "query": query_text.strip(),
-                    "timestamp": result.get("metadata", {}).get("timestamp") or time.time(),
-                    "confidence": (
-                        result.get("investigation", {}).get("confidence")
-                        if isinstance(result.get("investigation"), dict)
-                        else "unknown"
-                    ),
-                    "response": result,
-                }
-                save_history_entry(history_entry)
-                st.session_state["is_investigating"] = False
-                # Defer clearing the query box to the next run: the text_area
-                # widget (key="query_input_area") was already instantiated
-                # earlier in this run, so its key can't be modified here.
-                st.session_state["clear_query"] = True
-                st.rerun()
-
-            except BackendConnectionError as exc:
-                st.error(f"🔌 **Backend Connection Error:** {exc}")
-            except BackendTimeoutError as exc:
-                st.error(f"⏱️ **Investigation Timed Out:** {exc}")
-            except RepositoryNotFoundError as exc:
-                st.error(f"🔍 **Repository Not Found:** {exc}")
-            except InvestigationError as exc:
-                st.error(f"❌ **Investigation Failed:** {exc.message}")
-            except ApiClientError as exc:
-                st.error(f"⚠️ **API Error:** {exc.message}")
-            except Exception as exc:
-                st.error(f"💥 **Unexpected Error:** {exc}")
-            finally:
-                st.session_state["is_investigating"] = False
-
-    # ── Results ────────────────────────────────────────────────────────────────
     latest = st.session_state.get("latest_investigation")
     if latest:
         st.divider()
@@ -256,86 +264,66 @@ def render_investigation_result(result: dict[str, Any]) -> None:
     citations = investigation.get("citations", [])
     question = investigation.get("question") or result.get("query", "")
     question_type = result.get("question_type")
+    total_time = metadata.get("total_time_seconds") or investigation.get("execution_time_seconds")
 
-    # ── Result header ──────────────────────────────────────────────────────────
-    col_q, col_badge = st.columns([4, 1], gap="small")
-    with col_q:
-        st.markdown(f"#### {question}")
-        if question_type:
-            st.markdown(
-                f'<span style="font-size:0.75rem; color:#6e7681;">Intent: <code>{question_type}</code></span>',
-                unsafe_allow_html=True,
-            )
-    with col_badge:
-        st.markdown(
-            '<div style="display:flex; justify-content:flex-end; padding-top:6px;">'
-            + get_confidence_badge_html(confidence)
-            + "</div>",
-            unsafe_allow_html=True,
+    meta_bits = []
+    if repo_info.get("name"):
+        meta_bits.append(html.escape(str(repo_info["name"])))
+    if question_type:
+        meta_bits.append(f"Intent <code>{html.escape(str(question_type))}</code>")
+    if total_time is not None:
+        meta_bits.append(format_execution_time(total_time))
+    if citations:
+        meta_bits.append(f"{len(citations)} source{'s' if len(citations) != 1 else ''}")
+
+    st.html(
+        f"""
+        <div class="oi-result-head">
+            <h3>{html.escape(str(question))}</h3>
+            {get_confidence_badge_html(confidence)}
+        </div>
+        <div class="oi-result-meta">{" · ".join(meta_bits)}</div>
+        """
+    )
+
+    with st.container(border=True):
+        if answer:
+            st.markdown(answer)
+        else:
+            st.warning("No answer text was generated for this investigation.")
+
+    if limitations:
+        st.warning(
+            "**Verification limits and evidence gaps**\n\n" + "\n".join(f"- {lim}" for lim in limitations),
+            icon=":material/info:",
         )
 
-    # ── Answer ─────────────────────────────────────────────────────────────────
-    st.markdown(
-        '<p style="font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:#6e7681; margin: 16px 0 6px 0;">📝 Grounded Answer</p>',
-        unsafe_allow_html=True,
-    )
-    if answer:
-        st.markdown(answer)
-    else:
-        st.warning("No answer text was generated for this investigation.")
-
-    # ── Limitations ────────────────────────────────────────────────────────────
-    if limitations:
-        with st.container():
-            st.markdown(
-                """
-                <div style="background:rgba(187,128,9,0.1); border:1px solid #bb8009;
-                border-radius:8px; padding:12px 16px; margin:12px 0;">
-                    <p style="margin:0 0 6px 0; font-size:0.82rem; font-weight:700; color:#d29922;">
-                        ⚠️ Verification Limits &amp; Evidence Gaps
-                    </p>
-                """,
-                unsafe_allow_html=True,
-            )
-            for lim in limitations:
-                st.markdown(f"- {lim}")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    # ── Citations ──────────────────────────────────────────────────────────────
-    st.divider()
-    repo_url = repo_info.get("url") or st.session_state.get("selected_repo", {}).get("url")
+    repo_url = repo_info.get("url") or (st.session_state.get("selected_repo") or {}).get("url")
     render_evidence_citations(
         citations=citations,
         repository_url=repo_url,
         answer_text=answer,
     )
 
-    # ── Diagnostics ────────────────────────────────────────────────────────────
-    st.divider()
-    with st.expander("🛠️ Investigation Diagnostics", expanded=False):
-        d1, d2, d3, d4 = st.columns(4, gap="small")
-
+    with st.expander("Investigation diagnostics", icon=":material/insights:"):
         engine = metadata.get("engine") or metadata.get("execution_engine") or "LangGraph"
         rounds = metadata.get("rounds_executed") or metadata.get("retrieval_rounds")
         repair = metadata.get("repair_attempts", 0)
-        total_time = (
-            metadata.get("total_time_seconds")
-            or investigation.get("execution_time_seconds")
-        )
 
+        d1, d2, d3, d4 = st.columns(4, gap="small")
         with d1:
             st.metric("Engine", engine)
         with d2:
-            st.metric("Retrieval Rounds", rounds if rounds is not None else "1")
+            st.metric("Retrieval rounds", rounds if rounds is not None else "1")
         with d3:
-            st.metric("Citation Repairs", repair)
+            st.metric("Citation repairs", repair)
         with d4:
-            st.metric("Total Time", format_execution_time(total_time))
+            st.metric("Total time", format_execution_time(total_time))
 
         if evidence_summary:
-            st.markdown("##### Evidence Summary")
-            st.json(evidence_summary)
+            st.markdown("##### Evidence summary")
+            st.json(evidence_summary, expanded=False)
 
         if metadata:
-            st.markdown("##### Raw Workflow Metadata")
-            st.json(metadata)
+            st.markdown("##### Raw workflow metadata")
+            st.json(metadata, expanded=False)

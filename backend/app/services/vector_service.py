@@ -74,6 +74,24 @@ class VectorService:
             ),
         )
 
+    def count_repository(self, repository_id: int) -> int:
+        repository_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="repository_id",
+                    match=MatchValue(value=repository_id),
+                )
+            ]
+        )
+
+        result = self.client.count(
+            collection_name=self.COLLECTION_NAME,
+            count_filter=repository_filter,
+            exact=True,
+        )
+
+        return result.count
+
     def search(
         self,
         vector: list[float],
@@ -98,3 +116,15 @@ class VectorService:
         )
 
         return result.points
+
+
+def create_vector_service():
+    """Return the vector store selected by the VECTOR_BACKEND setting."""
+    from backend.app.core.config import settings
+
+    if settings.vector_backend == "pgvector":
+        from backend.app.services.pgvector_service import PgVectorService
+
+        return PgVectorService()
+
+    return VectorService()

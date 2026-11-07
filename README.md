@@ -151,11 +151,20 @@ QUERY_ANALYZER_MODEL=llama-3.3-70b-versatile
 
 Server runs at `http://localhost:8000`. API docs at `http://localhost:8000/docs`.
 
+### 6. Start the Web UI
+
+```powershell
+pip install -r frontend/requirements.txt
+streamlit run frontend/streamlit_app.py --server.port 8501
+```
+
+Open `http://localhost:8501`. On first visit the **Getting started** page shows a live setup checklist. Add a repository on the **Repositories** page and it is cloned and indexed in one step. Once it shows **Ready**, ask questions on **Investigate**.
+
 ---
 
 ## Indexing a Repository
 
-Run these four steps in order. Each step depends on the previous one.
+The web UI runs all of these steps for you. To drive the API directly, run these four steps in order. Each step depends on the previous one, and each records its stage on the repository (`cloned` → `parsed` → `chunked` → `indexed`). `GET /repositories` returns that `stage` along with `file_count`, `chunk_count` and `vector_count`.
 
 ```bash
 # 1. Clone the repository

@@ -53,8 +53,68 @@ class TestLanguageServiceExtensions:
 
     def test_case_insensitive_extension(self):
         # Extension detection is already lower-cased
-        assert self.svc.detect("README.MD") is None  # .md not in list — correct
+        assert self.svc.detect("README.MD") == "markdown"
         assert self.svc.detect("data.JSON") == "json"
+
+    @pytest.mark.parametrize("path, language", [
+        ("src/lib/supabase.mjs", "javascript"),
+        ("scripts/import-companies.cjs", "javascript"),
+        ("wrangler.jsonc", "json"),
+        ("drizzle/0009_rfq_marketplace.sql", "sql"),
+        ("PROJECT_BRIEF.md", "markdown"),
+        ("docs/page.mdx", "markdown"),
+        ("docs/index.rst", "markdown"),
+    ])
+    def test_module_schema_and_doc_extensions_detected(self, path, language):
+        assert self.svc.detect(path) == language
+
+
+# ---------------------------------------------------------------------------
+# CodeIndexer – ES module / CommonJS parsing, content-only SQL and Markdown
+# ---------------------------------------------------------------------------
+
+class TestCodeIndexerNewExtensions:
+    """.mjs/.cjs get JavaScript symbols; .sql/.md are indexed without parsing."""
+
+    def setup_method(self):
+        from backend.app.services.code_indexer import CodeIndexer
+        self.indexer = CodeIndexer()
+
+    def _analyze(self, tmp_path, name, source):
+        path = tmp_path / name
+        path.write_text(source, encoding="utf-8")
+        language = self.indexer.language_service.detect(str(path))
+        return self.indexer._analyze_file(path, language)
+
+    def test_mjs_functions_and_imports_extracted(self, tmp_path):
+        analysis = self._analyze(tmp_path, "rfq.mjs", (
+            "import { db } from './db.mjs';\n"
+            "export async function submitRfq(buyer, details) {\n"
+            "  return db.insert(buyer, details);\n"
+            "}\n"
+        ))
+        assert "submitRfq" in [f["name"] for f in analysis["functions"]]
+        assert analysis["imports"]
+
+    def test_cjs_functions_extracted(self, tmp_path):
+        analysis = self._analyze(tmp_path, "seed.cjs", (
+            "const fs = require('fs');\n"
+            "function loadCompanies(file) {\n"
+            "  return JSON.parse(fs.readFileSync(file, 'utf8'));\n"
+            "}\n"
+            "module.exports = { loadCompanies };\n"
+        ))
+        assert "loadCompanies" in [f["name"] for f in analysis["functions"]]
+
+    @pytest.mark.parametrize("name, source", [
+        ("0009_rfq.sql", "CREATE TABLE rfqs (id serial PRIMARY KEY, quote_count int);\n"),
+        ("PROJECT_BRIEF.md", "# FirmsLedger\n\nUS manufacturer directory.\n"),
+    ])
+    def test_sql_and_markdown_are_content_only(self, tmp_path, name, source):
+        with patch.object(self.indexer.tree_sitter_analyzer, "analyze",
+                          side_effect=AssertionError("content-only files must not be parsed")):
+            analysis = self._analyze(tmp_path, name, source)
+        assert (analysis["functions"], analysis["classes"], analysis["imports"]) == ([], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -426,3 +486,32 @@ class TestCodeChunkServiceManifests:
             )
             assert len(chunks) >= 1
             assert "@angular/core" in chunks[0].content
+
+    def test_markdown_file_without_symbols_is_chunked_by_heading(self, tmp_path):
+        from backend.app.services.code_chunk_service import CodeChunkService
+
+        svc = CodeChunkService()
+        rf = MagicMock(id=7, path="PROJECT_BRIEF.md", language="markdown")
+        (tmp_path / rf.path).write_text(
+            "# FirmsLedger\nUS manufacturer directory.\n\n## Pricing\nFree, Featured, Premium.\n",
+            encoding="utf-8",
+        )
+        db = MagicMock()
+        db.scalars.return_value.all.side_effect = [[rf], []]  # files, then no symbols
+
+        with patch("backend.app.services.code_chunk_service.should_include_file", return_value=True), \
+                patch.object(svc, "_clear_existing_chunks"):
+            chunks = svc.create_chunks(db=db, repository_id=5, repository_path=str(tmp_path))
+
+        assert [(c.start_line, c.content.splitlines()[0]) for c in chunks] == [
+            (1, "# FirmsLedger"), (4, "## Pricing"),
+        ]
+
+    def test_sql_file_uses_fallback_chunker(self, tmp_path):
+        from backend.app.services.code_chunk_service import CodeChunkService
+
+        svc = CodeChunkService()
+        sql = tmp_path / "seed.sql"
+        sql.write_text("\n".join(f"INSERT INTO categories VALUES ({i});" for i in range(200)), encoding="utf-8")
+        chunks = svc._create_fallback_chunks(repository_id=5, file_id=1, file_path=sql)
+        assert [(c.start_line, c.end_line) for c in chunks] == [(1, 80), (81, 160), (161, 200)]

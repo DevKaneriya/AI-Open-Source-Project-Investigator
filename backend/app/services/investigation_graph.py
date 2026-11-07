@@ -22,6 +22,7 @@ Workflow:
 """
 
 import logging
+import re
 import time
 from typing import Any, Optional, TypedDict
 
@@ -48,6 +49,7 @@ from backend.app.services.evidence_evaluation_service import (
 )
 from backend.app.services.query_analyzer_service import QueryAnalyzerService
 from backend.app.services.retrieval_service import RetrievalService
+from backend.app.services.repository_workspace import ensure_local_copy
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +73,13 @@ class InvestigationState(TypedDict, total=False):
 
     # Search planning & execution
     planned_queries: dict  # {"symbol_queries": [...], "text_queries": [...], "import_queries": [...]}
+    executed_queries: list[str]  # "kind:query" keys already run in earlier rounds
     raw_search_results: dict
 
     # Evidence collection & ranking
     accumulated_evidence: list[dict]
     evidence_summary: dict
+    search_coverage: dict  # repository-wide searches: {"references": {...}, "computations": {...}}
 
     # Sufficiency evaluation
     evidence_evaluation: Optional[dict]
@@ -233,33 +237,36 @@ class InvestigationGraphService:
                 "import_queries": qa.get("import_queries", [])[:3],
             }
         else:
-            # Subsequent rounds: Use recommended queries from evidence evaluation
+            # Subsequent rounds: use the evaluator's targeted queries, which are
+            # derived from the specific missing evidence (route fragments of
+            # observed client URLs, routed handler names, referenced models,
+            # callers of client methods) rather than generic keywords.
             eval_data = state.get("evidence_evaluation", {})
             rec_queries = eval_data.get("recommended_queries", {})
-            missing_stages = eval_data.get("missing_stages", [])
 
-            sym_queries = list(rec_queries.get("symbol_queries", []))
-            txt_queries = list(rec_queries.get("text_queries", []))
-            imp_queries = list(rec_queries.get("import_queries", []))
+            planned = self._unexecuted_queries(rec_queries, state.get("executed_queries", []))
 
-            # Augment targeted searches if key stages are missing
-            if "url_routing" in missing_stages and not any("urls.py" in q for q in txt_queries):
-                txt_queries.append("urls.py")
-            if "ui_event_handler" in missing_stages and not any("cart.ts" in q for q in txt_queries):
-                txt_queries.append("cart.ts")
-
-            planned = {
-                "symbol_queries": sym_queries[:5],
-                "text_queries": txt_queries[:5],
-                "import_queries": imp_queries[:3],
-            }
+        executed = list(state.get("executed_queries", []))
+        for kind, queries in planned.items():
+            executed.extend(f"{kind}:{query}" for query in queries)
 
         stage_times = dict(state.get("stage_times", {}))
         stage_times[f"plan_retrieval_round_{current_round}_seconds"] = round(time.time() - t0, 3)
 
         return {
             "planned_queries": planned,
+            "executed_queries": executed,
             "stage_times": stage_times,
+        }
+
+    @staticmethod
+    def _unexecuted_queries(recommended: dict, executed: list[str]) -> dict:
+        """Recommended follow-up queries minus those already run in earlier rounds."""
+        done = set(executed)
+        limits = {"symbol_queries": 5, "text_queries": 5, "import_queries": 3, "caller_queries": 3}
+        return {
+            kind: [q for q in recommended.get(kind, []) if f"{kind}:{q}" not in done][:limit]
+            for kind, limit in limits.items()
         }
 
     def _retrieve_evidence_node(self, state: InvestigationState) -> dict:
@@ -326,8 +333,11 @@ class InvestigationGraphService:
                     logger.warning(f"Architectural retrieval failed: {exc}")
                     arch_results = []
 
-            # 6. Extract source context for found candidates
-            source_candidates = symbol_results + text_results + semantic_results
+            # 6. Extract source context for found candidates. Only a bounded
+            # number get context, so interleave the search kinds; otherwise
+            # broad symbol matches use every slot and targeted text hits
+            # (e.g. the client URL a follow-up searched for) are dropped.
+            source_candidates = self._interleave(symbol_results, text_results, semantic_results)
             source_context = []
             if repo_path and source_candidates:
                 source_context = self.retrieval_service._build_source_context(
@@ -351,6 +361,54 @@ class InvestigationGraphService:
                     source_context.extend(flow_extra)
                 except Exception as exc:
                     logger.warning(f"Flow retrieval failed: {exc}")
+
+            # 7a. Profile-specific repository-wide retrieval (round 0 only):
+            # every reference site of a call-site target, the full trace of a
+            # named function, or every computation of an asked quantity. Each
+            # records its coverage so completeness/absence claims can be checked.
+            coverage = dict(state.get("search_coverage") or {})
+            if current_round == 0 and repo_path:
+                try:
+                    profile_context, coverage = self._profile_retrieval(db, repo_id, repo_path, state["query"], question_type, coverage)
+                    # Placed first: these windows are the question's direct answer.
+                    source_context = profile_context + source_context
+                except Exception as exc:
+                    logger.warning(f"Profile retrieval failed: {exc}")
+
+            # 7b. Relationship traversal (bounded): client URL -> route ->
+            # handler -> serializers/models, plus callers of requested symbols.
+            caller_queries = planned.get("caller_queries", [])
+            if repo_path and (
+                caller_queries
+                or question_type not in (
+                    QuestionType.SYMBOL_LOOKUP.value,
+                    QuestionType.DEPENDENCY_ANALYSIS.value,
+                )
+            ):
+                # Client calls seen only in partial windows are completed to
+                # their whole method first, so traversal knows which client
+                # method issues the request and can find its callers.
+                try:
+                    completed = self.retrieval_service._complete_client_methods(
+                        db, repo_id, repo_path, source_context + text_results, state["query"],
+                    )
+                    if isinstance(completed, list):
+                        source_context.extend(completed)
+                except Exception as exc:
+                    logger.warning(f"Client method completion failed: {exc}")
+                try:
+                    traversal = self.retrieval_service._relationship_traversal(
+                        db=db,
+                        repository_id=repo_id,
+                        repository_path=repo_path,
+                        evidence_items=list(state.get("accumulated_evidence", [])) + source_context + text_results,
+                        question=state["query"],
+                        caller_queries=caller_queries,
+                    )
+                    if isinstance(traversal, list):
+                        source_context.extend(traversal)
+                except Exception as exc:
+                    logger.warning(f"Relationship traversal failed: {exc}")
 
             # 8. Relationships
             relationships = []
@@ -382,8 +440,38 @@ class InvestigationGraphService:
 
         return {
             "raw_search_results": raw_results,
+            "search_coverage": coverage,
             "stage_times": stage_times,
         }
+
+    def _profile_retrieval(
+        self, db: Session, repo_id: int, repo_path: str, query: str, question_type: Optional[str], coverage: dict,
+    ) -> tuple[list[dict], dict]:
+        from backend.app.services import evidence_signals
+
+        evaluator = type(self.evidence_evaluation_service)
+        if not hasattr(evaluator, "evaluation_profile"):
+            return [], coverage
+        profile = evaluator.evaluation_profile(query, question_type)
+        contexts: list[dict] = []
+        if profile == "call_site":
+            backend_only = bool(re.search(r"\bmodels?\b|\btable\b|\borm\b|\bcrud\b", query, re.IGNORECASE))
+            references = dict(coverage.get("references", {}))
+            for target in evaluator._question_identifiers(query)[:2]:
+                found, record = self.retrieval_service._reference_search(db, repo_id, repo_path, target, backend_only)
+                contexts.extend(found)
+                references[record["identifier"]] = record
+            coverage = {**coverage, "references": references}
+        elif profile == "symbol_trace":
+            for target in evaluator.function_targets(query)[:2]:
+                contexts.extend(self.retrieval_service._symbol_trace_retrieval(db, repo_id, repo_path, target))
+        elif profile == "calculation":
+            found, record = self.retrieval_service._computation_retrieval(
+                db, repo_id, repo_path, evidence_signals.numeric_terms(query),
+            )
+            contexts.extend(found)
+            coverage = {**coverage, "computations": {**coverage.get("computations", {}), **record}}
+        return contexts, coverage
 
     def _collect_rank_evidence_node(self, state: InvestigationState) -> dict:
         """Node 4: Collect, merge, and rank evidence from current round into accumulated evidence."""
@@ -407,28 +495,38 @@ class InvestigationGraphService:
             except ValueError:
                 q_enum = None
 
+        # The registry may hold more than the answer prompt: the prompt is
+        # capped separately (stage evidence first), so a larger per-round cap
+        # keeps relationship evidence *and* the code that seeded it.
         collector_res = self.evidence_collector_service.collect(
             retrieval_results=retrieval_dict,
-            max_evidence=12,
+            max_evidence=18,
             question_type=q_enum,
         )
 
         new_evidence_raw = collector_res.get("evidence", [])
         new_evidence = self.retrieval_service._transform_evidence_for_response(new_evidence_raw)
 
-        # Merge new evidence with accumulated evidence (deduplicating by file + start_line)
+        # Merge new evidence into the canonical evidence registry for this
+        # investigation (deduplicating by normalised file + start_line).
+        # Existing IDs never change; new items get the next free ID, and each
+        # item records the repository it was retrieved from.
         accumulated = list(state.get("accumulated_evidence", []))
-        seen = {(item.get("file"), item.get("start_line")) for item in accumulated}
+        seen = {
+            ((item.get("file") or "").replace("\\", "/"), item.get("start_line"))
+            for item in accumulated
+        }
 
         for item in new_evidence:
-            key = (item.get("file"), item.get("start_line"))
-            if key not in seen:
-                seen.add(key)
-                accumulated.append(item)
+            key = ((item.get("file") or "").replace("\\", "/"), item.get("start_line"))
+            if key in seen or self._is_redundant_window(item, accumulated):
+                continue
+            seen.add(key)
+            accumulated.append(item)
 
-        # Re-assign stable evidence IDs: E1, E2, ...
         for idx, item in enumerate(accumulated, start=1):
-            item["evidence_id"] = f"E{idx}"
+            item.setdefault("evidence_id", f"E{idx}")
+            item.setdefault("repository_id", state.get("repository_id"))
 
         stage_times = dict(state.get("stage_times", {}))
         stage_times[f"collect_rank_round_{current_round}_seconds"] = round(time.time() - t0, 3)
@@ -453,18 +551,30 @@ class InvestigationGraphService:
         evidence = state.get("accumulated_evidence", [])
         q_type = state.get("question_type")
 
+        # The routing edge only runs round index r+1 while r+1 < max_rounds, so
+        # the last executable round is max_rounds - 1. The evaluator is told
+        # this so that its final verdict uses max-rounds semantics instead of
+        # announcing a follow-up round that can never execute.
+        last_round = max(0, max_rounds - 1)
         evaluation: EvidenceEvaluation = self.evidence_evaluation_service.evaluate(
             question=state["query"],
             evidence=evidence,
             question_type=q_type,
             current_round=current_round,
-            max_rounds=max_rounds,
+            max_rounds=last_round,
+            search_coverage=state.get("search_coverage") or {},
         )
 
         # Bug-1 fix: Boundary enforcement must be STRICT.
-        # If current_round has already reached max_rounds, retrieval_needed MUST be False
+        # If no further round can run, retrieval_needed MUST be False
         # regardless of what the evaluator returned. This prevents looping past the limit.
-        retrieval_needed = evaluation.retrieval_needed and (current_round < max_rounds)
+        retrieval_needed = evaluation.retrieval_needed and (current_round < last_round)
+
+        # Another round is only useful if it would run something new.
+        if retrieval_needed and not any(
+            self._unexecuted_queries(evaluation.recommended_queries, state.get("executed_queries", [])).values()
+        ):
+            retrieval_needed = False
 
         stage_times = dict(state.get("stage_times", {}))
         stage_times[f"evaluate_round_{current_round}_seconds"] = round(time.time() - t0, 3)
@@ -484,7 +594,10 @@ class InvestigationGraphService:
     def _generate_answer_node(self, state: InvestigationState) -> dict:
         """Node 6: Generate grounded answer using answer_generation_service."""
         t0 = time.time()
-        evidence = state.get("accumulated_evidence", [])
+        evidence = self._order_evidence_for_answer(
+            state.get("accumulated_evidence", []),
+            state.get("evidence_evaluation") or {},
+        )
         q_type = state.get("question_type")
         repo_name = state.get("repository_info", {}).get("name")
 
@@ -525,6 +638,8 @@ class InvestigationGraphService:
             answer=answer,
             evidence=evidence,
             repository_path=repo_path,
+            repository_id=state.get("repository_id"),
+            search_coverage=state.get("search_coverage") or {},
         )
 
         stage_times = dict(state.get("stage_times", {}))
@@ -539,7 +654,10 @@ class InvestigationGraphService:
         """Node 8: Repair answer if citation validation failed (max 1 attempt)."""
         t0 = time.time()
         answer = state["answer"]
-        evidence = state.get("accumulated_evidence", [])
+        evidence = self._order_evidence_for_answer(
+            state.get("accumulated_evidence", []),
+            state.get("evidence_evaluation") or {},
+        )
         val_dict = state.get("citation_validation", {})
         attempts = state.get("repair_attempts", 0)
 
@@ -547,7 +665,7 @@ class InvestigationGraphService:
         val_result = CitationValidationResult(
             is_valid=val_dict.get("is_valid", False),
             valid_citations=answer.citations,
-            invalid_citations=[],
+            invalid_citations=val_dict.get("invalid_citations", []),
             hallucinated_ids=val_dict.get("hallucinated_ids", []),
             unsupported_claims=val_dict.get("unsupported_claims", []),
             repair_needed=True,
@@ -558,13 +676,29 @@ class InvestigationGraphService:
             answer=answer,
             evidence=evidence,
             validation_result=val_result,
+            repository_path=state.get("repository_path"),
+            search_coverage=state.get("search_coverage") or {},
         )
+
+        # Re-validate the repaired answer so the reported status describes
+        # what is actually returned, not the pre-repair answer.
+        revalidated = self.citation_validation_service.validate_answer_citations(
+            answer=repaired_answer,
+            evidence=evidence,
+            repository_path=state.get("repository_path"),
+            repository_id=state.get("repository_id"),
+            search_coverage=state.get("search_coverage") or {},
+        ).to_dict()
+        revalidated["repair_attempted"] = True
+        revalidated["pre_repair_status"] = val_dict.get("validation_status")
+        revalidated["pre_repair_unsupported_claims"] = val_dict.get("unsupported_claims", [])
 
         stage_times = dict(state.get("stage_times", {}))
         stage_times["citation_repair_seconds"] = round(time.time() - t0, 3)
 
         return {
             "answer": repaired_answer,
+            "citation_validation": revalidated,
             "repair_attempts": attempts + 1,
             "stage_times": stage_times,
         }
@@ -576,6 +710,16 @@ class InvestigationGraphService:
 
         answer = state["answer"]
         answer.execution_time_seconds = total_time
+
+        # High confidence is only allowed for an answer whose claims were
+        # actually evaluated and verified against cited evidence.
+        validation = state.get("citation_validation") or {}
+        status = validation.get("validation_status")
+        if status and status != "verified" and answer.confidence == "high":
+            answer.confidence = "partial"
+            note = f"Citation validation status: {status}. {validation.get('details', '')}".strip()
+            if note not in answer.limitations:
+                answer.limitations.append(note)
 
         repo_info = state.get("repository_info", {})
         qa = state.get("query_analysis", {})
@@ -610,6 +754,93 @@ class InvestigationGraphService:
             "total_execution_time_seconds": total_time,
         }
 
+    @staticmethod
+    def _interleave(*result_lists: list) -> list:
+        """Round-robin merge of result lists, preserving each list's order."""
+        merged = []
+        for index in range(max((len(results) for results in result_lists), default=0)):
+            for results in result_lists:
+                if index < len(results):
+                    merged.append(results[index])
+        return merged
+
+    MAX_CONTAINER_LINES = 80
+
+    @classmethod
+    def _is_redundant_window(cls, item: dict, accumulated: list[dict]) -> bool:
+        """True when *item* repeats code already in the registry.
+
+        Redundant: fully inside a registered item of modest size (e.g. a
+        method inside its class), or overlapping a registered window by 60%+
+        (e.g. adjacent route-line windows). Whole-file windows are not used as
+        containers because they get truncated before reaching the LLM.
+        """
+        try:
+            start, end = int(item.get("start_line")), int(item.get("end_line"))
+        except (TypeError, ValueError):
+            return False
+        if end < start:
+            return False
+
+        from backend.app.services import evidence_signals
+
+        file_key = (item.get("file") or "").replace("\\", "/")
+        span = end - start + 1
+        names = evidence_signals.defined_names(item)
+
+        for other in accumulated:
+            if (other.get("file") or "").replace("\\", "/") != file_key:
+                continue
+            try:
+                o_start, o_end = int(other.get("start_line")), int(other.get("end_line"))
+            except (TypeError, ValueError):
+                continue
+            overlap = min(end, o_end) - max(start, o_start) + 1
+            if overlap <= 0:
+                continue
+            # A window that adds a definition (e.g. the enclosing class name
+            # that a route refers to) is not redundant.
+            if not names <= evidence_signals.defined_names(other):
+                continue
+            contained = o_start <= start and end <= o_end
+            if contained and (o_end - o_start + 1) <= cls.MAX_CONTAINER_LINES:
+                return True
+            if not contained and overlap / span >= 0.6 and (o_end - o_start + 1) <= cls.MAX_CONTAINER_LINES:
+                return True
+        return False
+
+    @staticmethod
+    def _order_evidence_for_answer(evidence: list[dict], evaluation: dict) -> list[dict]:
+        """Order registry evidence for the (size-capped) answer prompt.
+
+        Evidence that establishes an evaluated stage comes first, then the rest
+        by relevance with indirect files (tests/admin/migrations/docs) last.
+        Without this, later targeted retrieval rounds never reach the LLM
+        because the first round fills the prompt budget.
+        """
+        from backend.app.services import evidence_signals
+
+        # Round-robin over stages (each stage's first item, then each second
+        # item ...) so a capped prompt still covers every stage, e.g. the
+        # backend total computation after many frontend subtotal sites.
+        stage_ids: list[str] = []
+        per_stage = [list(stage.get("evidence_ids") or []) for stage in evaluation.get("flow_stages") or []]
+        for depth in range(max((len(ids) for ids in per_stage), default=0)):
+            for ids in per_stage:
+                if depth < len(ids) and ids[depth] not in stage_ids:
+                    stage_ids.append(ids[depth])
+
+        rank = {eid: idx for idx, eid in enumerate(stage_ids)}
+        return sorted(
+            evidence,
+            key=lambda item: (
+                0 if item.get("evidence_id") in rank else 1,
+                rank.get(item.get("evidence_id"), 0),
+                1 if evidence_signals.is_indirect(item.get("file")) else 0,
+                -(item.get("relevance_score") or 0.0),
+            ),
+        )
+
     # =========================================================================
     # CONDITIONAL ROUTING EDGES
     # =========================================================================
@@ -637,6 +868,12 @@ class InvestigationGraphService:
         repair_needed = val.get("repair_needed", False)
         attempts = state.get("repair_attempts", 0)
         max_attempts = state.get("max_repair_attempts", self.MAX_REPAIR_ATTEMPTS)
+
+        # An "insufficient" answer without citations (e.g. generation failed)
+        # has nothing grounded to repair.
+        answer = state.get("answer")
+        if answer is not None and answer.confidence == "insufficient" and not answer.citations:
+            repair_needed = False
 
         if repair_needed and attempts < max_attempts:
             logger.info("Routing to repair answer citations")
@@ -671,6 +908,8 @@ class InvestigationGraphService:
         repo = db.get(Repository, repository_id)
         if not repo:
             raise ValueError(f"Repository with ID {repository_id} not found.")
+
+        ensure_local_copy(db, repo)
 
         if not repo.local_path:
             raise ValueError(f"Repository '{repo.name}' has not been cloned.")

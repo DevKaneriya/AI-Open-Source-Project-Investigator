@@ -1,0 +1,411 @@
+/* OpenSource Investigator — component styles.
+   Colors, fonts and radii come from .streamlit/config.toml; this file only
+   styles custom HTML blocks and adjusts layout for small screens. */
+
+:root {
+  --oi-bg-raised: #131a26;
+  --oi-bg-sunken: #0e131d;
+  --oi-border: #232d3d;
+  --oi-border-strong: #2f3b50;
+  --oi-text: #d6deeb;
+  --oi-text-strong: #f2f5fa;
+  --oi-muted: #8a96aa;
+  --oi-faint: #64718a;
+  --oi-accent: #4f8cff;
+  --oi-accent-soft: rgba(79, 140, 255, 0.14);
+  --oi-green: #3fb970;
+  --oi-green-soft: rgba(63, 185, 112, 0.14);
+  --oi-amber: #e3a93b;
+  --oi-amber-soft: rgba(227, 169, 59, 0.14);
+  --oi-red: #f26b6b;
+  --oi-red-soft: rgba(242, 107, 107, 0.14);
+  --oi-radius: 0.75rem;
+}
+
+/* ── Layout ─────────────────────────────────────────────────────────── */
+.block-container {
+  max-width: 1120px;
+  padding-top: 2.5rem;
+  padding-bottom: 4rem;
+}
+
+/* ── Page header ────────────────────────────────────────────────────── */
+.oi-page-header { margin: 0 0 1.25rem; }
+.oi-eyebrow {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--oi-accent);
+  margin-bottom: 0.35rem;
+}
+.oi-page-header h1 {
+  font-size: 1.85rem;
+  line-height: 1.2;
+  margin: 0;
+  padding: 0;
+  color: var(--oi-text-strong);
+}
+.oi-page-header p {
+  margin: 0.4rem 0 0;
+  color: var(--oi-muted);
+  font-size: 0.98rem;
+  max-width: 46rem;
+}
+
+.oi-section-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--oi-faint);
+  margin: 0.25rem 0 0.6rem;
+}
+
+.oi-muted { color: var(--oi-muted); }
+
+/* ── Hero (Getting Started) ─────────────────────────────────────────── */
+.oi-hero {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--oi-border);
+  border-radius: 1rem;
+  padding: 2rem 2rem 1.75rem;
+  margin-bottom: 1.5rem;
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(79, 140, 255, 0.18) 0%, transparent 55%),
+    radial-gradient(90% 120% at 0% 100%, rgba(63, 185, 112, 0.10) 0%, transparent 60%),
+    var(--oi-bg-raised);
+}
+.oi-hero h1 {
+  font-size: 2.1rem;
+  line-height: 1.15;
+  margin: 0 0 0.6rem;
+  padding: 0;
+  color: var(--oi-text-strong);
+}
+.oi-hero p {
+  margin: 0;
+  max-width: 40rem;
+  color: var(--oi-muted);
+  font-size: 1.02rem;
+  line-height: 1.6;
+}
+
+/* ── Progress meter ─────────────────────────────────────────────────── */
+.oi-meter { display: flex; align-items: center; gap: 0.75rem; margin: 0.25rem 0 1rem; }
+.oi-meter__track {
+  flex: 1;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--oi-bg-sunken);
+  border: 1px solid var(--oi-border);
+  overflow: hidden;
+}
+.oi-meter__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--oi-accent), #6fb7ff);
+}
+.oi-meter__text { font-size: 0.85rem; color: var(--oi-muted); white-space: nowrap; }
+
+/* ── Setup checklist ────────────────────────────────────────────────── */
+.oi-check {
+  display: flex;
+  gap: 0.9rem;
+  align-items: flex-start;
+  padding: 0.85rem 0;
+}
+.oi-check + .oi-check { border-top: 1px solid var(--oi-border); }
+.oi-check__icon {
+  flex: 0 0 auto;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  border: 1px solid var(--oi-border-strong);
+  color: var(--oi-faint);
+  background: var(--oi-bg-sunken);
+}
+.oi-check--done .oi-check__icon { background: var(--oi-green-soft); border-color: transparent; color: var(--oi-green); }
+.oi-check--current .oi-check__icon { background: var(--oi-accent-soft); border-color: var(--oi-accent); color: var(--oi-accent); }
+.oi-check--blocked .oi-check__icon { background: var(--oi-red-soft); border-color: transparent; color: var(--oi-red); }
+.oi-check__body { min-width: 0; }
+.oi-check__title { font-weight: 600; color: var(--oi-text-strong); font-size: 0.98rem; }
+.oi-check--done .oi-check__title { color: var(--oi-muted); }
+.oi-check__desc { color: var(--oi-muted); font-size: 0.88rem; margin-top: 0.15rem; line-height: 1.5; }
+
+/* ── Feature / step cards ───────────────────────────────────────────── */
+.oi-card {
+  height: 100%;
+  border: 1px solid var(--oi-border);
+  border-radius: var(--oi-radius);
+  background: var(--oi-bg-raised);
+  padding: 1.15rem 1.2rem;
+}
+.oi-card__num {
+  display: inline-grid;
+  place-items: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 0.5rem;
+  background: var(--oi-accent-soft);
+  color: var(--oi-accent);
+  font-weight: 700;
+  font-size: 0.85rem;
+  margin-bottom: 0.7rem;
+}
+.oi-card h4 { margin: 0 0 0.35rem; padding: 0; font-size: 1.02rem; color: var(--oi-text-strong); }
+.oi-card p { margin: 0; color: var(--oi-muted); font-size: 0.9rem; line-height: 1.55; }
+
+/* ── Chips (stage / confidence) ─────────────────────────────────────── */
+.oi-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.18rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  line-height: 1.5;
+}
+.oi-chip__dot { width: 0.45rem; height: 0.45rem; border-radius: 999px; background: currentColor; }
+.oi-chip--ready { color: var(--oi-green); background: var(--oi-green-soft); }
+.oi-chip--progress { color: var(--oi-amber); background: var(--oi-amber-soft); }
+.oi-chip--failed { color: var(--oi-red); background: var(--oi-red-soft); }
+.oi-chip--idle { color: var(--oi-muted); background: rgba(138, 150, 170, 0.12); }
+.oi-chip--accent { color: var(--oi-accent); background: var(--oi-accent-soft); }
+
+/* ── Stepper ────────────────────────────────────────────────────────── */
+.oi-stepper {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0;
+  margin: 0.5rem 0 0.2rem !important;
+  padding: 0 !important;
+}
+.oi-stepper__item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--oi-faint);
+  margin: 0 !important;
+  padding: 0 !important;
+}
+.oi-stepper__item:not(:last-child)::after {
+  content: "";
+  width: 1.4rem;
+  height: 1px;
+  background: var(--oi-border-strong);
+  margin: 0 0.5rem;
+}
+.oi-stepper__dot {
+  display: grid;
+  place-items: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  border: 1px solid var(--oi-border-strong);
+  background: var(--oi-bg-sunken);
+}
+.oi-stepper__item--done { color: var(--oi-muted); }
+.oi-stepper__item--done .oi-stepper__dot { background: var(--oi-green-soft); color: var(--oi-green); border-color: transparent; }
+.oi-stepper__item--next { color: var(--oi-text-strong); }
+.oi-stepper__item--next .oi-stepper__dot { border-color: var(--oi-amber); color: var(--oi-amber); }
+.oi-stepper__item--failed { color: var(--oi-red); }
+.oi-stepper__item--failed .oi-stepper__dot { border-color: var(--oi-red); color: var(--oi-red); }
+
+/* ── Repository header row ──────────────────────────────────────────── */
+.oi-repo-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+.oi-repo-head__name {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--oi-text-strong);
+}
+.oi-repo-head__name span.oi-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oi-repo-head a { font-size: 0.85rem; text-decoration: none; white-space: nowrap; }
+.oi-repo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.1rem;
+  color: var(--oi-muted);
+  font-size: 0.84rem;
+  margin-top: 0.35rem;
+}
+.oi-repo-meta b { color: var(--oi-text); font-weight: 600; }
+.oi-url {
+  color: var(--oi-faint);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+  margin-top: 0.15rem;
+}
+
+/* ── Callouts ───────────────────────────────────────────────────────── */
+.oi-callout {
+  border: 1px solid var(--oi-border);
+  border-left: 3px solid var(--oi-accent);
+  border-radius: 0.6rem;
+  background: var(--oi-bg-raised);
+  padding: 0.85rem 1rem;
+  margin: 0 0 0.75rem;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+.oi-callout--warn { border-left-color: var(--oi-amber); }
+.oi-callout strong { color: var(--oi-text-strong); }
+
+/* ── Investigation result header ────────────────────────────────────── */
+.oi-result-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  margin-bottom: 0.25rem;
+}
+.oi-result-head h3 {
+  margin: 0;
+  padding: 0;
+  font-size: 1.25rem;
+  line-height: 1.35;
+  color: var(--oi-text-strong);
+  flex: 1 1 18rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.oi-result-meta { font-size: 0.8rem; color: var(--oi-faint); margin-bottom: 0.75rem; }
+.oi-result-meta code { font-size: 0.78rem; }
+
+/* ── Tip list ───────────────────────────────────────────────────────── */
+.oi-tip { display: flex; gap: 0.6rem; align-items: baseline; margin: 0 0 0.55rem; font-size: 0.92rem; line-height: 1.5; }
+.oi-tip__tag {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.08rem 0.45rem;
+  border-radius: 0.35rem;
+}
+.oi-tip__tag--good { color: var(--oi-green); background: var(--oi-green-soft); }
+.oi-tip__tag--bad { color: var(--oi-red); background: var(--oi-red-soft); }
+
+/* ── Sidebar ────────────────────────────────────────────────────────── */
+/* Streamlit's sidebar header is taller than its collapse button needs; pull
+   the brand up so it lines up with the top of the main content. */
+.oi-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: -2.25rem 0 1rem;
+  min-width: 0;
+}
+.oi-brand > div:last-child { min-width: 0; }
+.oi-brand__mark {
+  width: 2.2rem;
+  height: 2.2rem;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 0.65rem;
+  background: linear-gradient(135deg, #4f8cff, #3fb970);
+  color: #fff;
+  font-weight: 800;
+  font-size: 0.95rem;
+  letter-spacing: -0.02em;
+}
+.oi-brand__title,
+.oi-brand__sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.oi-brand__title { font-weight: 700; color: var(--oi-text-strong); font-size: 0.95rem; line-height: 1.25; }
+.oi-brand__sub { color: var(--oi-faint); font-size: 0.75rem; line-height: 1.3; }
+.oi-side-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--oi-faint);
+  margin: 0.25rem 0 0.35rem;
+}
+.oi-side-foot { color: var(--oi-faint); font-size: 0.76rem; margin-top: 0.5rem; overflow-wrap: anywhere; }
+.oi-side-status { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.2rem; font-size: 0.8rem; }
+
+section[data-testid="stSidebar"] div[data-testid="stButton"] button,
+section[data-testid="stSidebar"] div[data-testid="stButton"] button > div {
+  justify-content: flex-start;
+  text-align: left;
+  min-width: 0;
+}
+section[data-testid="stSidebar"] div[data-testid="stButton"] button > div { width: 100%; }
+/* Icon + label row: left-aligned, and the label may shrink below its text
+   width so long questions ellipsize inside the button instead of overflowing
+   both edges (the row is centered by default). */
+section[data-testid="stSidebar"] div[data-testid="stButton"] button > div > span {
+  justify-content: flex-start;
+  min-width: 0;
+  max-width: 100%;
+}
+section[data-testid="stSidebar"] div[data-testid="stButton"] button [data-testid="stIconMaterial"] { flex-shrink: 0; }
+section[data-testid="stSidebar"] div[data-testid="stButton"] button [data-testid="stMarkdownContainer"] {
+  min-width: 0;
+  overflow: hidden;
+}
+section[data-testid="stSidebar"] div[data-testid="stButton"] button p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Streamlit element polish ───────────────────────────────────────── */
+div[data-testid="stMetric"] {
+  border: 1px solid var(--oi-border);
+  border-radius: var(--oi-radius);
+  background: var(--oi-bg-raised);
+  padding: 0.75rem 0.95rem;
+}
+div[data-testid="stMetricValue"] { font-size: 1.35rem; }
+div[data-testid="stExpander"] details summary p { overflow-wrap: anywhere; }
+div[data-testid="stCode"] pre { max-width: 100%; }
+
+/* Investigate question box: a taller single-line input (Enter submits).
+   The bordered root has a fixed height, so it must grow with the input. */
+.st-key-query_input_area [data-testid="stTextInputRootElement"] {
+  height: auto;
+  min-height: 3.5rem;
+  border-radius: var(--oi-radius);
+}
+.st-key-query_input_area input {
+  font-size: 1.05rem;
+  padding: 0.9rem 1.1rem;
+}
+
+/* ── Small screens ──────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .block-container { padding-top: 3.5rem; padding-left: 1rem; padding-right: 1rem; }
+  .oi-page-header h1 { font-size: 1.5rem; }
+  .oi-hero { padding: 1.35rem 1.15rem; border-radius: 0.85rem; }
+  .oi-hero h1 { font-size: 1.6rem; }
+  .oi-hero p { font-size: 0.95rem; }
+  .oi-card { padding: 1rem; }
+  .oi-result-head h3 { font-size: 1.1rem; flex-basis: 100%; }
+  .oi-stepper__item:not(:last-child)::after { width: 0.7rem; margin: 0 0.35rem; }
+  .oi-stepper__label { font-size: 0.75rem; }
+}

@@ -1,188 +1,140 @@
 """
-Sidebar navigation, target repository selection, and session history management.
+Sidebar: brand, page navigation, active repository selection, and recent queries.
 """
 
 from __future__ import annotations
 
+import html
 from typing import Any
 
 import streamlit as st
 
 from frontend.api_client import ApiClient
 from frontend.utils.formatting import format_timestamp
-from frontend.utils.repo_manager import sync_repositories
 from frontend.utils.history_manager import load_history, clear_history
+from frontend.utils.navigation import go, select_repository
+from frontend.utils.pipeline import is_ready, pick_default_repo, stage_chip_html, stage_unknown
+
+REPO_SELECT_KEY = "sidebar_repo_select"
 
 
-def _sidebar_header() -> None:
-    """Render the sleek developer-focused brand header inside the sidebar."""
-    st.markdown(
+def _brand() -> None:
+    st.html(
         """
-        <div class="sidebar-brand">
-            <div class="sidebar-brand-badge">⚡</div>
-            <div class="sidebar-brand-text">
-                <span class="sidebar-brand-title">OpenSource Investigator</span>
-                <span class="sidebar-brand-sub">AI Code Intelligence</span>
+        <div class="oi-brand">
+            <div class="oi-brand__mark">OI</div>
+            <div>
+                <div class="oi-brand__title">OpenSource Investigator</div>
+                <div class="oi-brand__sub">Evidence-grounded answers</div>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
 
-def render_sidebar(api_client: ApiClient) -> str:
-    """
-    Render sidebar controls and navigation.
-    Returns the selected page key ('investigation', 'repositories', 'status').
-    """
-    with st.sidebar:
-        # ── Header ────────────────────────────────────────────────────────────
-        _sidebar_header()
+def _on_repo_change(repos_by_id: dict[int, dict[str, Any]]) -> None:
+    repo = repos_by_id.get(st.session_state.get(REPO_SELECT_KEY))
+    if repo:
+        select_repository(repo)
 
-        # ── Primary Navigation ────────────────────────────────────────────────
-        st.markdown(
-            '<p class="sidebar-section-label">🗂 Navigation</p>',
-            unsafe_allow_html=True,
-        )
 
-        nav_options = {
-            "🔍  Investigation": "investigation",
-            "📦  Repositories": "repositories",
-            "🚦  System Status": "status",
-        }
+def _repository_selector(repos: list[dict[str, Any]], repo_error: str | None) -> None:
+    st.html('<div class="oi-side-label">Active repository</div>')
 
-        current_nav = st.session_state.get("active_page", "investigation")
-        default_index = 0
-        for i, val in enumerate(nav_options.values()):
-            if val == current_nav:
-                default_index = i
-                break
-
-        selected_label = st.radio(
-            "Navigation",
-            options=list(nav_options.keys()),
-            index=default_index,
-            label_visibility="collapsed",
-        )
-        selected_page = nav_options[selected_label]
-        st.session_state["active_page"] = selected_page
-
-        # ── Divider ───────────────────────────────────────────────────────────
-        st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
-
-        # ── Target Repository Selector ────────────────────────────────────────
-        st.markdown(
-            '<p class="sidebar-section-label">🎯 Target Repository</p>',
-            unsafe_allow_html=True,
-        )
-
-        repo_error = st.session_state.get("repositories_error")
-        repos = st.session_state.get("repositories", [])
-
+    repos_by_id = {r["id"]: r for r in repos if isinstance(r, dict) and "id" in r}
+    if not repos_by_id:
         if repo_error:
-            st.markdown(
-                f'<p class="sidebar-error-msg">⚠️ {repo_error}</p>',
-                unsafe_allow_html=True,
-            )
-
-        if repos:
-            repo_map = {
-                f"#{r['id']}  {r.get('name', 'Repository')}": r
-                for r in repos
-                if isinstance(r, dict) and "id" in r
-            }
-            current_id = st.session_state.get("selected_repo_id")
-            labels = list(repo_map.keys())
-            sel_idx = 0
-            for idx, lbl in enumerate(labels):
-                if repo_map[lbl]["id"] == current_id:
-                    sel_idx = idx
-                    break
-
-            chosen_label = st.selectbox(
-                "Active Codebase",
-                options=labels,
-                index=sel_idx,
-                key="sidebar_repo_select",
-                label_visibility="collapsed",
-            )
-            active_data = repo_map[chosen_label]
-            st.session_state["selected_repo"] = active_data
-            st.session_state["selected_repo_id"] = active_data["id"]
-
-            status = active_data.get("status", "")
-            status_colour = (
-                "#3fb950" if status == "indexed"
-                else "#d29922" if status in ("active", "cloned")
-                else "#8b949e"
-            )
-            clean_url = api_client.base_url.replace("http://", "").replace("https://", "")
-            st.markdown(
-                f"""
-                <div class="repo-status-row">
-                    <span style="color:{status_colour}; font-weight:500;">● {status.capitalize() if status else "Ready"}</span>
-                    <span style="color:#6e7681;" title="{api_client.base_url}">🔌 {clean_url}</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.caption("⚠️ Can't reach the backend. Check **System status**.")
         else:
-            if not repo_error:
-                st.markdown(
-                    '<p class="sidebar-caption">No repositories configured yet.</p>',
-                    unsafe_allow_html=True,
-                )
-            clean_url = api_client.base_url.replace("http://", "").replace("https://", "")
-            st.markdown(
-                f'<p class="sidebar-caption">🔌 {clean_url}</p>',
-                unsafe_allow_html=True,
+            st.caption("No repositories yet.")
+        if st.button("Add a repository", icon=":material/add:", use_container_width=True, key="side_add_repo"):
+            go("repositories")
+        return
+
+    selected_id = st.session_state.get("selected_repo_id")
+    if selected_id not in repos_by_id:
+        default = pick_default_repo(list(repos_by_id.values()))
+        select_repository(default)
+        selected_id = default["id"]
+
+    # The selectbox mirrors selected_repo_id, which other pages may change.
+    if st.session_state.get(REPO_SELECT_KEY) != selected_id:
+        st.session_state[REPO_SELECT_KEY] = selected_id
+
+    st.selectbox(
+        "Active repository",
+        options=list(repos_by_id.keys()),
+        format_func=lambda rid: repos_by_id[rid].get("name") or f"Repository #{rid}",
+        key=REPO_SELECT_KEY,
+        on_change=_on_repo_change,
+        args=(repos_by_id,),
+        label_visibility="collapsed",
+    )
+
+    repo = repos_by_id[selected_id]
+    if stage_unknown(repo):
+        hint = "Restart backend"
+    else:
+        hint = "Ready to investigate" if is_ready(repo) else "Needs indexing"
+    st.html(
+        f'<div class="oi-side-status">{stage_chip_html(repo)}'
+        f'<span class="oi-muted">{hint}</span></div>'
+    )
+
+
+def _recent_queries() -> None:
+    st.html('<div class="oi-side-label">Recent questions</div>')
+    history = load_history()
+    if not history:
+        st.caption("Your questions will appear here.")
+        return
+
+    for idx, item in enumerate(history[:5]):
+        query = item.get("query", "Query")
+        tooltip = (
+            f"{query}\n\nRepo: {item.get('repository_name', '')} · "
+            f"Confidence: {item.get('confidence', '')} · {format_timestamp(item.get('timestamp'))}"
+        )
+        if st.button(
+            query,
+            key=f"hist_btn_{idx}",
+            help=tooltip,
+            icon=":material/history:",
+            type="tertiary",
+            use_container_width=True,
+        ):
+            st.session_state["latest_investigation"] = item.get("response")
+            st.session_state["pending_query"] = query
+            repo = next(
+                (r for r in st.session_state.get("repositories", []) if r.get("id") == item.get("repository_id")),
+                None,
             )
+            if repo:
+                select_repository(repo)
+            go("investigate")
 
-        # ── Divider ───────────────────────────────────────────────────────────
-        st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
+    if st.button("Clear history", key="btn_clear_hist", icon=":material/delete_sweep:", type="tertiary", use_container_width=True):
+        clear_history()
+        st.rerun()
 
-        # ── Recent Investigations ─────────────────────────────────────────────
-        st.markdown(
-            '<p class="sidebar-section-label">📜 Recent Queries</p>',
-            unsafe_allow_html=True,
+
+def render_sidebar(api_client: ApiClient, pages: dict[str, Any]) -> None:
+    with st.sidebar:
+        _brand()
+
+        st.page_link(pages["guide"], label="Getting started", icon=":material/rocket_launch:")
+        st.page_link(pages["investigate"], label="Investigate", icon=":material/search:")
+        st.page_link(pages["repositories"], label="Repositories", icon=":material/folder_code:")
+        st.page_link(pages["status"], label="System status", icon=":material/monitor_heart:")
+
+        st.divider()
+        _repository_selector(
+            st.session_state.get("repositories", []),
+            st.session_state.get("repositories_error"),
         )
 
-        history = load_history()
+        st.divider()
+        _recent_queries()
 
-        if not history:
-            st.markdown(
-                '<p class="sidebar-caption">No recent queries yet.</p>',
-                unsafe_allow_html=True,
-            )
-        else:
-            for idx, item in enumerate(history[:5]):
-                q = item.get("query", "Query")
-                repo_name = item.get("repository_name", "")
-                conf = item.get("confidence", "")
-                ts = format_timestamp(item.get("timestamp"))
-
-                short_q = (q[:28] + "…") if len(q) > 28 else q
-                label = f"💬 {short_q}"
-
-                if st.button(
-                    label,
-                    key=f"hist_btn_{idx}",
-                    help=f"{q}\nRepo: {repo_name} | Confidence: {conf} | {ts}",
-                    use_container_width=True,
-                ):
-                    st.session_state["latest_investigation"] = item.get("response")
-                    st.session_state["query_input_text"] = q
-                    st.session_state["query_input_area"] = q
-                    st.session_state["selected_repo_id"] = item.get("repository_id")
-                    st.session_state["active_page"] = "investigation"
-                    st.rerun()
-
-            if st.button(
-                "🗑 Clear History",
-                key="btn_clear_hist",
-                use_container_width=True,
-            ):
-                clear_history()
-                st.rerun()
-
-    return selected_page
+        clean_url = api_client.base_url.replace("http://", "").replace("https://", "")
+        st.html(f'<div class="oi-side-foot">Backend · {html.escape(clean_url)}</div>')

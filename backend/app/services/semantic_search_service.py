@@ -52,6 +52,15 @@ class SemanticSearchService:
             limit=limit,
         )
 
+        # Defence in depth: the Qdrant filter already scopes by
+        # repository_id, but never trust a payload from another repository.
+        points = [
+            point
+            for point in points or []
+            if point.payload
+            and point.payload.get("repository_id") == repository_id
+        ]
+
         if not points:
             return []
 
@@ -79,7 +88,8 @@ class SemanticSearchService:
 
         files = db.scalars(
             select(RepositoryFile).where(
-                RepositoryFile.id.in_(file_ids)
+                RepositoryFile.id.in_(file_ids),
+                RepositoryFile.repository_id == repository_id,
             )
         ).all()
 
@@ -118,6 +128,14 @@ class SemanticSearchService:
 
             file = file_map.get(file_id)
             symbol = symbol_map.get(symbol_id)
+
+            # A chunk whose file is not part of this repository is a stale
+            # or foreign vector; drop it rather than return a wrong path.
+            if file is None:
+                continue
+
+            if symbol is not None and symbol.file_id != file.id:
+                symbol = None
 
             results.append(
                 {

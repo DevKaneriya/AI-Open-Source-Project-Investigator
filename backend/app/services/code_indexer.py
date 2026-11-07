@@ -90,7 +90,7 @@ class CodeIndexer:
         # Manifest / plain-text files have no parseable symbols.
         # Return an empty analysis so the file record is created and
         # CodeChunkService can fall through to its fallback chunker.
-        _CONTENT_ONLY_LANGUAGES = {"json", "text", "toml", "yaml"}
+        _CONTENT_ONLY_LANGUAGES = {"json", "text", "toml", "yaml", "sql", "markdown"}
         if language in _CONTENT_ONLY_LANGUAGES:
             return {
                 "file": str(file_path),

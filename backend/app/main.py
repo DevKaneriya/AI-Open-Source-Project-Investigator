@@ -21,7 +21,7 @@ from backend.app.services.repository_search_service import RepositorySearchServi
 from backend.app.services.code_relationship_service import CodeRelationshipService
 from backend.app.services.repository_investigation_service import RepositoryInvestigationService
 from backend.app.services.embedding_service import EmbeddingService
-from backend.app.services.vector_service import VectorService
+from backend.app.services.vector_service import create_vector_service
 from backend.app.services.vector_indexing_service import VectorIndexingService
 from backend.app.services.code_chunk_service import CodeChunkService
 from backend.app.services.semantic_search_service import SemanticSearchService
@@ -39,6 +39,7 @@ from backend.app.models.code_symbol import CodeSymbol
 from backend.app.models.code_import import CodeImport
 from backend.app.models.code_chunk import CodeChunk
 from backend.app.models.investigation_answer import InvestigationResponse
+from backend.app.services.repository_workspace import ensure_local_copy
 
 # NOTE: Table creation is now managed via Alembic migrations
 # Run migrations with: alembic upgrade head
@@ -64,7 +65,7 @@ code_chunk_service = CodeChunkService()
 
 embedding_service = EmbeddingService()
 
-vector_service = VectorService()
+vector_service = create_vector_service()
 
 vector_indexing_service = VectorIndexingService(
     embedding_service=embedding_service,
@@ -146,17 +147,21 @@ def index_repository(
             detail="Repository not found.",
         )
 
+    ensure_local_copy(db, repository)
+
     if not repository.local_path:
         raise HTTPException(
             status_code=400,
             detail="Repository has not been cloned.",
         )
 
-    return code_indexer.index_repository(
+    result = code_indexer.index_repository(
         db,
         repository.id,
         repository.local_path,
     )
+    repository_service.set_status(db, repository.id, "parsed")
+    return result
 
 
 @app.get("/repositories/{repository_id}/search")
@@ -185,7 +190,7 @@ def search_repository(
     
 @app.get("/repositories", tags=["Repositories"])
 def list_repositories(db: Session = Depends(get_db)):
-    return repository_service.list_repositories(db)
+    return repository_service.list_repositories(db, vector_service)
 
 
 @app.post("/repositories")
@@ -204,29 +209,25 @@ def delete_repository(
     repository_id: int,
     db: Session = Depends(get_db),
 ):
-    # Delete the repository's vectors from Qdrant first. The vectors are
-    # re-derivable via re-indexing, so removing them before the PostgreSQL rows
-    # is the safer order: if the PostgreSQL delete fails afterwards the rows
-    # still exist and can simply be re-indexed.
-    #
-    # The two stores cannot share a transaction, so if the vector DB is
-    # unreachable we log a warning and still proceed with the PostgreSQL
-    # deletion so the user is not blocked by a transient vector-DB outage.
-    # Any orphaned vectors left behind can be cleaned up later by re-indexing.
-    try:
-        vector_service.delete_repository(repository_id)
-    except Exception as exc:
-        print(
-            f"WARNING: Failed to delete vectors for repository "
-            f"{repository_id} from Qdrant: {exc}. "
-            f"Proceeding with PostgreSQL deletion; orphaned vectors may remain."
-        )
-
-    deleted = repository_service.delete_repository(db, repository_id)
-    if not deleted:
+    # Vectors are deleted first; if Qdrant fails, PostgreSQL is left intact
+    # so the delete can be retried instead of orphaning vectors behind a 404.
+    outcome = repository_service.delete_repository_everywhere(
+        db,
+        repository_id,
+        vector_service,
+    )
+    if outcome == "not_found":
         raise HTTPException(
             status_code=404,
             detail="Repository not found.",
+        )
+    if outcome == "vector_delete_failed":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not delete this repository's vectors from the vector database. "
+                "Nothing was deleted; please retry."
+            ),
         )
     return {"message": "Repository deleted successfully.", "repository_id": repository_id}
     
@@ -246,6 +247,8 @@ def get_source(
             status_code=404,
             detail="Repository not found.",
         )
+
+    ensure_local_copy(db, repository)
 
     if not repository.local_path:
         raise HTTPException(
@@ -287,6 +290,8 @@ def search_repository_text(
             status_code=404,
             detail="Repository not found.",
         )
+
+    ensure_local_copy(db, repository)
 
     if not repository.local_path:
         raise HTTPException(
@@ -638,10 +643,12 @@ def index_repository_vectors(
     db: Session = Depends(get_db),
 ):
     try:
-        return vector_indexing_service.index_chunks(
+        result = vector_indexing_service.index_chunks(
             db=db,
             repository_id=repository_id,
         )
+        repository_service.set_status(db, repository_id, "indexed")
+        return result
 
     except ValueError as exc:
         raise HTTPException(
@@ -668,6 +675,8 @@ def create_repository_chunks(
             detail="Repository not found.",
         )
 
+    ensure_local_copy(db, repository)
+
     if not repository.local_path:
         raise HTTPException(
             status_code=400,
@@ -680,6 +689,7 @@ def create_repository_chunks(
             repository_id=repository_id,
             repository_path=repository.local_path,
         )
+        repository_service.set_status(db, repository_id, "chunked")
 
         return {
             "repository_id": repository_id,

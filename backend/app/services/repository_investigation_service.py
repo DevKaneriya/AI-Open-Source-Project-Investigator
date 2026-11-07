@@ -16,6 +16,7 @@ from backend.app.services.repository_search_service import (
 from backend.app.services.import_search_service import (
     ImportSearchService,
 )
+from backend.app.services.repository_workspace import ensure_local_copy
 
 
 class RepositoryInvestigationService:
@@ -41,6 +42,8 @@ class RepositoryInvestigationService:
             raise ValueError(
                 "Repository not found."
             )
+
+        ensure_local_copy(db, repository)
 
         if not repository.local_path:
             raise ValueError(
