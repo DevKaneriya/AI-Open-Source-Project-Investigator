@@ -16,6 +16,7 @@ from typing import Any
 import streamlit as st
 
 from frontend.utils.access import demo_mode
+from frontend.utils.errors import report_error
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,9 @@ def load_history() -> list[dict[str, Any]]:
                 if isinstance(data, list):
                     history = [item for item in data if isinstance(item, dict) and "query" in item]
         except Exception as exc:
-            logger.warning("Failed to load investigation history from %s: %s", HISTORY_FILE, exc)
+            report_error("Couldn't load your question history", exc,
+                         context={"History file": str(HISTORY_FILE)},
+                         hint="Your earlier questions won't appear in the sidebar. New questions are still saved.")
             history = []
 
     st.session_state["investigation_history"] = history
@@ -89,7 +92,9 @@ def save_history_entry(entry: dict[str, Any]) -> list[dict[str, Any]]:
         if temp_file.exists():
             temp_file.replace(HISTORY_FILE)
     except Exception as exc:
-        logger.warning("Failed to save investigation history to %s: %s", HISTORY_FILE, exc)
+        report_error("Couldn't save this question to your history", exc,
+                     context={"History file": str(HISTORY_FILE)},
+                     hint="The answer is fine; it just won't be kept after the app restarts. Check the folder is writable.")
 
     return new_history
 
@@ -101,4 +106,6 @@ def clear_history() -> None:
         try:
             os.remove(HISTORY_FILE)
         except Exception as exc:
-            logger.warning("Failed to remove history file %s: %s", HISTORY_FILE, exc)
+            report_error("Couldn't delete the history file", exc,
+                         context={"History file": str(HISTORY_FILE)},
+                         hint="History is cleared for this session. Delete the file by hand if it should be gone for good.")

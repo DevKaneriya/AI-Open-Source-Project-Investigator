@@ -1,4 +1,8 @@
-from fastapi import FastAPI
+import logging
+import uuid
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from fastapi import Depends, HTTPException
@@ -50,6 +54,24 @@ app = FastAPI(
     description="Agentic AI platform for investigating open-source software repositories.",
     version="0.1.0",
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Turn any unhandled error into JSON the UI can show, with an ID that matches the log."""
+    error_id = uuid.uuid4().hex[:8]
+    logging.getLogger("backend.errors").error(
+        "[API error %s] %s %s failed: %s", error_id, request.method, request.url.path, exc, exc_info=exc
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+            "error_type": type(exc).__name__,
+            "error_id": error_id,
+            "path": request.url.path,
+        },
+    )
 
 
 github_service = GitHubService()

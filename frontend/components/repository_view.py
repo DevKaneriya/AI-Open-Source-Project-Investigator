@@ -13,6 +13,7 @@ import streamlit as st
 
 from frontend.api_client import ApiClient, ApiClientError
 from frontend.utils.access import backend_unavailable_message, demo_mode, is_admin
+from frontend.utils.errors import report_error
 from frontend.utils.navigation import flash, go, select_repository, show_flash
 from frontend.utils.pipeline import (
     OUTDATED_BACKEND_MESSAGE,
@@ -99,7 +100,7 @@ def _render_add_form(api_client: ApiClient, repos: list[dict[str, Any]]) -> None
             try:
                 repo = api_client.add_repository(clean)
             except ApiClientError as exc:
-                st.error(f"Couldn't add the repository: {exc.message}")
+                report_error("Couldn't add the repository", exc, context={"Repository URL": clean})
                 return
         _finish(api_client, True, repo, f"{repo.get('name')} was cloned. Index it to start investigating.")
 
@@ -118,7 +119,7 @@ def _render_delete(api_client: ApiClient, rid: int, name: str) -> None:
             try:
                 api_client.delete_repository(rid)
             except ApiClientError as exc:
-                st.error(f"Couldn't delete: {exc.message}")
+                report_error(f"Couldn't delete {name}", exc, context={"Repository": f"{name} (#{rid})"})
             else:
                 if st.session_state.get("selected_repo_id") == rid:
                     st.session_state["selected_repo_id"] = None
@@ -233,7 +234,8 @@ def _render_advanced(api_client: ApiClient, repos: list[dict[str, Any]]) -> None
                             try:
                                 res = call(int(rid))
                             except ApiClientError as exc:
-                                result_slot.error(f"{label} failed: {exc.message}")
+                                result_slot.empty()
+                                report_error(f"{label} failed", exc, context={"Repository ID": rid})
                             else:
                                 _refresh(api_client)
                                 with result_slot.container():
@@ -259,7 +261,7 @@ def _render_advanced(api_client: ApiClient, repos: list[dict[str, Any]]) -> None
                     try:
                         st.json(api_client.scan_repository(scan_url.strip()), expanded=1)
                     except ApiClientError as exc:
-                        st.error(f"Scan failed: {exc.message}")
+                        report_error("The architecture scan failed", exc, context={"Repository URL": scan_url.strip()})
 
 
 def render_repository_view(api_client: ApiClient) -> None:

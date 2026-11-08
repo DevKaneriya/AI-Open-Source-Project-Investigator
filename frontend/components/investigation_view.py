@@ -13,14 +13,8 @@ import streamlit as st
 
 from frontend.utils.access import backend_unavailable_message, demo_mode, is_admin, reserve_query
 from frontend.utils.history_manager import save_history_entry
-from frontend.api_client import (
-    ApiClient,
-    BackendConnectionError,
-    BackendTimeoutError,
-    InvestigationError,
-    RepositoryNotFoundError,
-    ApiClientError,
-)
+from frontend.api_client import ApiClient, ApiClientError, BackendTimeoutError
+from frontend.utils.errors import report_error
 from frontend.components.evidence_view import render_evidence_citations
 from frontend.utils.navigation import flash, go, show_flash, select_repository
 from frontend.utils.pipeline import (
@@ -159,9 +153,10 @@ def _render_target_banner(api_client: ApiClient, repo: dict[str, Any]) -> None:
 def _run_investigation(api_client: ApiClient, query: str) -> None:
     verified_repo, val_err = validate_selected_repository(api_client)
     if val_err or not verified_repo:
-        st.error(
-            f"**The selected repository is no longer available.** {val_err or ''}\n\n"
-            "Pick another repository in the sidebar or add one on the Repositories page."
+        report_error(
+            "The selected repository is no longer available",
+            val_err or "The repository could not be found on the backend.",
+            hint="Pick another repository in the sidebar or add one on the Repositories page.",
         )
         return
 
@@ -173,23 +168,25 @@ def _run_investigation(api_client: ApiClient, query: str) -> None:
         st.warning(rejection, icon=":material/hourglass_top:")
         return
 
+    context = {"Repository": f"{target_repo_name} (#{target_repo_id})", "Question": query}
     try:
         with st.spinner("Investigating: analysing the question, retrieving evidence and verifying citations…"):
             result = api_client.investigate(repository_id=int(target_repo_id), query=query)
-    except BackendConnectionError as exc:
-        st.error(f"**Backend connection error.** {exc}")
-        return
     except BackendTimeoutError as exc:
-        st.error(f"**The investigation timed out.** {exc} Try a narrower question.")
-        return
-    except RepositoryNotFoundError as exc:
-        st.error(f"**Repository not found.** {exc}")
-        return
-    except InvestigationError as exc:
-        st.error(f"**Investigation failed.** {exc.message}")
+        report_error("The investigation timed out", exc, context=context,
+                     hint="Try again, or ask a narrower question that names specific files, functions or flows.")
         return
     except ApiClientError as exc:
-        st.error(f"**API error.** {exc.message}")
+        report_error("The investigation failed", exc, context=context)
+        return
+
+    if not isinstance(result.get("investigation"), dict):
+        report_error(
+            "The investigation returned an unexpected response",
+            "The backend answered, but the response didn't contain an investigation result.",
+            context={**context, "Response": result},
+            hint="Try again. If it keeps happening, restart the backend so both parts run the latest code.",
+        )
         return
 
     st.session_state["latest_investigation"] = result
@@ -237,13 +234,15 @@ def render_investigation_view(api_client: ApiClient) -> None:
         on_change=_use_example,
     )
 
-    # A text input (not a text area) so Enter submits the form.
+    # A multi-line box for longer questions; Ctrl+Enter (Cmd+Enter on Mac) submits.
     with st.form("investigate_form", border=False):
-        query_text = st.text_input(
+        query_text = st.text_area(
             "Your question",
             key=QUERY_KEY,
+            height=140,
             placeholder="e.g. How does the checkout flow work from the UI to the database?",
-            help="Name the functions, classes, files or flows you care about for the most precise answers.",
+            help="Name the functions, classes, files or flows you care about for the most precise answers. "
+                 "Press Ctrl+Enter (Cmd+Enter on Mac) to submit.",
         )
         submitted = st.form_submit_button("Investigate", type="primary", icon=":material/search:")
 

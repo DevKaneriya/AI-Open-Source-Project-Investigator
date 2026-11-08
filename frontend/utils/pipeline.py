@@ -13,6 +13,7 @@ from typing import Any, Callable
 import streamlit as st
 
 from frontend.api_client import ApiClient, ApiClientError
+from frontend.utils.errors import report_error
 
 
 @dataclass(frozen=True)
@@ -190,14 +191,22 @@ def run_pipeline(
                 else:
                     result = _step_call(api_client, step.stage)(int(repo["id"]))
                     summary = _summarize(step.stage, result)
-            except ApiClientError as exc:
+            except Exception as exc:
                 status.update(label=f"{step.label} failed for {name}", state="error", expanded=True)
-                st.error(exc.message)
-                return False, repo or None, f"{step.label} failed: {exc.message}"
-            except Exception as exc:  # pragma: no cover - defensive
-                status.update(label=f"{step.label} failed for {name}", state="error", expanded=True)
-                st.error(str(exc))
-                return False, repo or None, f"{step.label} failed: {exc}"
+                message = exc.message if isinstance(exc, ApiClientError) else str(exc)
+                st.caption(f"✗ {message}")
+                report_error(
+                    f"Indexing stopped at step {i + 1}/{len(steps)}: {step.label}",
+                    exc,
+                    context={
+                        "Repository": name if not (repo or {}).get("id") else f"{name} (#{repo['id']})",
+                        "Step": f"{step.label}: {step.description}",
+                        **({"Repository URL": clone_url} if clone_url else {}),
+                    },
+                    hint=None if isinstance(exc, ApiClientError)
+                    else "An unexpected error happened in the app. Try again; the details below show where it failed.",
+                )
+                return False, repo or None, f"{step.label} failed: {message}"
 
             st.caption(f"✓ {summary}")
             progress.progress((i + 1) / len(steps))

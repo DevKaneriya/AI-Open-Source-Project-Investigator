@@ -385,15 +385,13 @@ div[data-testid="stMetricValue"] { font-size: 1.35rem; }
 div[data-testid="stExpander"] details summary p { overflow-wrap: anywhere; }
 div[data-testid="stCode"] pre { max-width: 100%; }
 
-/* Investigate question box: a taller single-line input (Enter submits).
-   The bordered root has a fixed height, so it must grow with the input. */
-.st-key-query_input_area [data-testid="stTextInputRootElement"] {
-  height: auto;
-  min-height: 3.5rem;
+/* Investigate question box: a multi-line area (Ctrl/Cmd+Enter submits). */
+.st-key-query_input_area [data-baseweb="textarea"] {
   border-radius: var(--oi-radius);
 }
-.st-key-query_input_area input {
+.st-key-query_input_area textarea {
   font-size: 1.05rem;
+  line-height: 1.5;
   padding: 0.9rem 1.1rem;
 }
 

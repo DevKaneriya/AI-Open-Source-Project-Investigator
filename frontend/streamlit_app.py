@@ -31,6 +31,7 @@ from frontend.components.guide_view import render_guide_view
 from frontend.components.investigation_view import render_investigation_view
 from frontend.components.repository_view import render_repository_view
 from frontend.components.status_view import render_status_view
+from frontend.utils.errors import render_error_dialog, report_error
 from frontend.utils.history_manager import load_history
 from frontend.utils.navigation import register_pages
 from frontend.utils.repo_manager import sync_repositories
@@ -106,8 +107,18 @@ def main() -> None:
         if not repo_error and not repos and current.url_path in ("", "investigate"):
             st.switch_page(pages["guide"])
 
-    render_sidebar(api_client, pages)
-    current.run()
+    # Any unexpected crash in the sidebar or a page becomes an error pop-up
+    # instead of a raw traceback. (st.rerun/st.stop are not Exceptions, so they pass through.)
+    try:
+        render_sidebar(api_client, pages)
+        current.run()
+    except Exception as exc:
+        report_error(
+            f"The {current.title} page hit an unexpected error",
+            exc,
+            hint="Try the action again or refresh the page. The details below show exactly where it failed.",
+        )
+    render_error_dialog()
 
 
 if __name__ == "__main__":

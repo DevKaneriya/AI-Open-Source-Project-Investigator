@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 from urllib.parse import urljoin, urlencode
 import requests
@@ -25,6 +26,10 @@ class ApiClientError(Exception):
         self.message = message
         self.status_code = status_code
         self.response_body = response_body
+        # Filled in by ApiClient._request so error pop-ups can show which call failed.
+        self.method: str | None = None
+        self.endpoint: str | None = None
+        self.elapsed_seconds: float | None = None
 
 
 class BackendConnectionError(ApiClientError):
@@ -86,6 +91,23 @@ class ApiClient:
         json_data: Any = None,
     ) -> dict[str, Any]:
         """Execute an HTTP request with structured error translation."""
+        started = time.monotonic()
+        try:
+            return self._send(method, path, timeout, params, json_data)
+        except ApiClientError as exc:
+            exc.method = method
+            exc.endpoint = path
+            exc.elapsed_seconds = round(time.monotonic() - started, 2)
+            raise
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        timeout: float | None,
+        params: dict | None,
+        json_data: Any,
+    ) -> dict[str, Any]:
         url = self._url(path)
         req_timeout = timeout or self.default_timeout
 
@@ -279,7 +301,9 @@ class ApiClient:
         except (BackendConnectionError, BackendTimeoutError, RepositoryNotFoundError, EndpointNotImplementedError):
             raise
         except ApiClientError as exc:
-            raise InvestigationError(str(exc), status_code=exc.status_code, response_body=exc.response_body) from exc
+            wrapped = InvestigationError(exc.message, status_code=exc.status_code, response_body=exc.response_body)
+            wrapped.method, wrapped.endpoint, wrapped.elapsed_seconds = exc.method, exc.endpoint, exc.elapsed_seconds
+            raise wrapped from exc
 
     # ──────────────────────────────────────────────────────────────────────────
     # Search & Inspection Diagnostics

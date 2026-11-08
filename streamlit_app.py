@@ -90,17 +90,33 @@ def ensure_backend() -> None:
         _start_backend()
 
 
+def _fail(title: str, error: BaseException | str, hint: str) -> None:
+    """Show a startup failure inline and as an error pop-up, then stop this run."""
+    from frontend.utils.errors import render_error_dialog, report_error
+
+    st.error(f"**{title}.** {error}")
+    report_error(title, error, hint=hint, key=f"startup:{title}")
+    render_error_dialog()
+    st.stop()
+
+
 _load_secrets_into_env()
 missing = [name for name in REQUIRED if not os.environ.get(name)]
 if missing:
-    st.error(f"Missing secrets: {', '.join(missing)}. Add them under the app's Settings → Secrets.")
-    st.stop()
+    _fail(
+        "The app is missing required secrets",
+        f"Not set: {', '.join(missing)}.",
+        "Add them under the app's Settings → Secrets on share.streamlit.io; the app restarts on save.",
+    )
 
 try:
     ensure_backend()
 except RuntimeError as error:
     _start_backend.clear()
-    st.error(str(error))
-    st.stop()
+    _fail(
+        "The backend couldn't start",
+        error,
+        "Refresh the page to try again. If it keeps failing, open Manage app → logs and check DATABASE_URL.",
+    )
 
 runpy.run_path(str(ROOT_DIR / "frontend" / "streamlit_app.py"), run_name="__main__")

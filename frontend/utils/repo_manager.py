@@ -20,6 +20,9 @@ from frontend.api_client import (
     EndpointNotImplementedError,
     ApiClientError,
 )
+from frontend.utils.errors import clear_error, report_error
+
+REPO_SYNC_ERROR_KEY = "repository-sync"
 
 
 def sync_repositories(
@@ -62,6 +65,7 @@ def sync_repositories(
             st.session_state["selected_repo_id"] = None
             st.session_state["selected_repo"] = None
 
+        clear_error(REPO_SYNC_ERROR_KEY)
         return repos, None
 
     except EndpointNotImplementedError as exc:
@@ -71,11 +75,13 @@ def sync_repositories(
         st.session_state["repositories_error"] = err
         st.session_state["selected_repo_id"] = None
         st.session_state["selected_repo"] = None
+        report_error("The backend doesn't support listing repositories", exc, key=REPO_SYNC_ERROR_KEY)
         return [], err
 
     except (BackendConnectionError, BackendTimeoutError, ApiClientError, Exception) as exc:
         err = f"Backend repository API error: {exc}"
         st.session_state["repositories_error"] = err
+        report_error("Couldn't load the repository list", exc, key=REPO_SYNC_ERROR_KEY)
         # If never initialized, ensure repositories list is empty
         if "repositories" not in st.session_state:
             st.session_state["repositories"] = []
