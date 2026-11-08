@@ -662,14 +662,22 @@ def investigate_repository_bulk(
 )
 def index_repository_vectors(
     repository_id: int,
+    time_budget_seconds: float = 60.0,
     db: Session = Depends(get_db),
 ):
+    """Embed chunks that have no vector yet, for about ``time_budget_seconds``.
+
+    Resumable: call again until the response says ``done: true``. Each call
+    stays short, so large repositories never hit HTTP timeouts.
+    """
     try:
         result = vector_indexing_service.index_chunks(
             db=db,
             repository_id=repository_id,
+            time_budget_seconds=min(max(time_budget_seconds, 5.0), 600.0),
         )
-        repository_service.set_status(db, repository_id, "indexed")
+        if result["done"]:
+            repository_service.set_status(db, repository_id, "indexed")
         return result
 
     except ValueError as exc:

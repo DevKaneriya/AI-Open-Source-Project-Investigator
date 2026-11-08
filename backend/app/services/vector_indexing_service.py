@@ -1,3 +1,16 @@
+"""
+Embeds a repository's code chunks and stores the vectors.
+
+Indexing is resumable: chunks that already have a vector are skipped, so an
+interrupted run continues where it stopped instead of starting over. With a
+time budget, one call embeds batches until the budget is used and reports how
+many chunks remain; callers repeat the call until ``done`` is true. This keeps
+every HTTP request short on slow hosts (a large repository on a shared CPU can
+take many minutes to embed in total).
+"""
+
+import logging
+import threading
 import time
 
 from qdrant_client.models import PointStruct
@@ -8,9 +21,21 @@ from backend.app.models.code_chunk import CodeChunk
 from backend.app.services.embedding_service import EmbeddingService
 from backend.app.services.vector_service import VectorService
 
+logger = logging.getLogger(__name__)
+
+_locks_guard = threading.Lock()
+_locks: dict[int, threading.Lock] = {}
+
+
+def _lock_for(repository_id: int) -> threading.Lock:
+    with _locks_guard:
+        return _locks.setdefault(repository_id, threading.Lock())
+
 
 class VectorIndexingService:
-    EMBEDDING_BATCH_SIZE = 256
+    # Small batches so a time budget is checked often; throughput on CPU is
+    # about the same as with larger batches.
+    EMBEDDING_BATCH_SIZE = 64
 
     def __init__(
         self,
@@ -20,143 +45,54 @@ class VectorIndexingService:
         self.embedding_service = embedding_service
         self.vector_service = vector_service
 
-    def index_chunks(self, db: Session, repository_id: int) -> dict:
-        overall_start = time.perf_counter()
+    def index_chunks(
+        self,
+        db: Session,
+        repository_id: int,
+        time_budget_seconds: float | None = None,
+    ) -> dict:
+        """Embed chunks that have no vector yet.
 
-        print("\n" + "=" * 70)
-        print("VECTOR INDEXING STARTED")
-        print("=" * 70)
-        print(f"Repository ID: {repository_id}")
-        print(f"Batch size: {self.EMBEDDING_BATCH_SIZE}")
+        With ``time_budget_seconds`` the call stops after the batch that uses
+        up the budget; without it, it runs until every chunk is embedded.
+        Returns progress counts, including ``remaining`` and ``done``.
+        """
+        # One run per repository at a time: a retry that arrives while an
+        # earlier request is still embedding waits, then skips its work.
+        with _lock_for(repository_id):
+            return self._index(db, repository_id, time_budget_seconds)
 
-        # ---------------------------------------------------------
-        # STEP 1: Load chunks from PostgreSQL
-        # ---------------------------------------------------------
+    def _index(self, db: Session, repository_id: int, time_budget_seconds: float | None) -> dict:
+        started = time.perf_counter()
 
-        step_start = time.perf_counter()
-
-        statement = (
+        chunks = db.scalars(
             select(CodeChunk)
             .where(CodeChunk.repository_id == repository_id)
             .order_by(CodeChunk.id)
-        )
+        ).all()
+        chunk_ids = {chunk.id for chunk in chunks}
 
-        chunks = db.scalars(statement).all()
+        existing = self.vector_service.existing_ids(repository_id)
+        # Vectors of chunks that no longer exist (the repository was re-chunked).
+        stale = existing - chunk_ids
+        if stale:
+            self.vector_service.delete_ids(stale)
+            existing -= stale
 
-        step_time = time.perf_counter() - step_start
+        pending = [chunk for chunk in chunks if chunk.id not in existing]
+        indexed_now = 0
 
-        print(f"\n[1] PostgreSQL chunk loading")
-        print(f"    Chunks found: {len(chunks)}")
-        print(f"    Time: {step_time:.3f} seconds")
-        
-        self.vector_service.delete_repository(repository_id)
-
-        if not chunks:
-            print("\nNo chunks found.")
-            return {
-                "repository_id": repository_id,
-                "chunks_indexed": 0,
-            }
-
-        total_batches = (
-            len(chunks) + self.EMBEDDING_BATCH_SIZE - 1
-        ) // self.EMBEDDING_BATCH_SIZE
-
-        print(f"    Total batches: {total_batches}")
-
-        # ---------------------------------------------------------
-        # STEP 2: Process batches
-        # ---------------------------------------------------------
-
-        total_indexed = 0
-
-        total_embedding_time = 0
-        total_point_creation_time = 0
-        total_qdrant_time = 0
-
-        for batch_number, start in enumerate(
-            range(0, len(chunks), self.EMBEDDING_BATCH_SIZE),
-            start=1,
-        ):
-            batch_start = time.perf_counter()
-
-            batch = chunks[
-                start:start + self.EMBEDDING_BATCH_SIZE
-            ]
-
-            print("\n" + "-" * 70)
-            print(
-                f"BATCH {batch_number}/{total_batches}"
-            )
-            print(
-                f"Chunks: {start + 1} - "
-                f"{start + len(batch)} "
-                f"({len(batch)} chunks)"
-            )
-
-            # -----------------------------------------------------
-            # STEP 2A: Build embedding text
-            # -----------------------------------------------------
-
-            text_start = time.perf_counter()
-
-            embedding_texts = [
-                self._build_embedding_text(chunk)
-                for chunk in batch
-            ]
-
-            text_time = time.perf_counter() - text_start
-
-            print(
-                f"  [A] Build embedding texts: "
-                f"{text_time:.3f}s"
-            )
-
-            # -----------------------------------------------------
-            # STEP 2B: Generate embeddings
-            # -----------------------------------------------------
-
-            embedding_start = time.perf_counter()
-
-            embeddings = self.embedding_service.embed_many(
-                embedding_texts
-            )
-
-            embedding_time = (
-                time.perf_counter() - embedding_start
-            )
-
-            total_embedding_time += embedding_time
-
-            print(
-                f"  [B] Generate embeddings: "
-                f"{embedding_time:.3f}s"
-            )
-
-            print(
-                f"      Embeddings generated: "
-                f"{len(embeddings)}"
-            )
-
-            if embeddings:
-                print(
-                    f"      Vector dimension: "
-                    f"{len(embeddings[0])}"
-                )
-
-            # -----------------------------------------------------
-            # STEP 2C: Create Qdrant points
-            # -----------------------------------------------------
-
-            point_start = time.perf_counter()
-
-            points = []
-
-            for chunk, embedding in zip(
-                batch,
-                embeddings,
+        for start in range(0, len(pending), self.EMBEDDING_BATCH_SIZE):
+            if time_budget_seconds is not None and indexed_now and (
+                time.perf_counter() - started >= time_budget_seconds
             ):
-                points.append(
+                break
+            batch = pending[start:start + self.EMBEDDING_BATCH_SIZE]
+            embeddings = self.embedding_service.embed_many(
+                [self._build_embedding_text(chunk) for chunk in batch]
+            )
+            self.vector_service.upsert(
+                [
                     PointStruct(
                         id=chunk.id,
                         vector=embedding,
@@ -169,98 +105,26 @@ class VectorIndexingService:
                             "content": chunk.content,
                         },
                     )
-                )
-
-            point_time = time.perf_counter() - point_start
-
-            total_point_creation_time += point_time
-
-            print(
-                f"  [C] Create Qdrant points: "
-                f"{point_time:.3f}s"
+                    for chunk, embedding in zip(batch, embeddings)
+                ]
             )
+            indexed_now += len(batch)
 
-            print(
-                f"      Points created: {len(points)}"
-            )
-
-            # -----------------------------------------------------
-            # STEP 2D: Qdrant upsert
-            # -----------------------------------------------------
-
-            qdrant_start = time.perf_counter()
-
-            self.vector_service.upsert(points)
-
-            qdrant_time = (
-                time.perf_counter() - qdrant_start
-            )
-
-            total_qdrant_time += qdrant_time
-
-            print(
-                f"  [D] Qdrant upsert: "
-                f"{qdrant_time:.3f}s"
-            )
-
-            # -----------------------------------------------------
-            # Batch total
-            # -----------------------------------------------------
-
-            batch_time = (
-                time.perf_counter() - batch_start
-            )
-
-            total_indexed += len(points)
-
-            print(
-                f"  [TOTAL] Batch time: "
-                f"{batch_time:.3f}s"
-            )
-
-            print(
-                f"  Progress: "
-                f"{total_indexed}/{len(chunks)} "
-                f"({total_indexed / len(chunks) * 100:.1f}%)"
-            )
-
-        # ---------------------------------------------------------
-        # FINAL SUMMARY
-        # ---------------------------------------------------------
-
-        total_time = (
-            time.perf_counter() - overall_start
+        vectors_total = len(existing) + indexed_now
+        remaining = len(chunks) - vectors_total
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "Repository %s: embedded %d chunks in %.1fs (%d/%d done, %d remaining)",
+            repository_id, indexed_now, elapsed, vectors_total, len(chunks), remaining,
         )
-
-        print("\n" + "=" * 70)
-        print("VECTOR INDEXING COMPLETED")
-        print("=" * 70)
-
-        print(f"Repository ID: {repository_id}")
-        print(f"Chunks indexed: {total_indexed}")
-        print(f"Total time: {total_time:.3f}s")
-
-        print("\nTIME BREAKDOWN")
-        print("-" * 70)
-        print(
-            f"Embedding time:       "
-            f"{total_embedding_time:.3f}s"
-        )
-        print(
-            f"Point creation time:   "
-            f"{total_point_creation_time:.3f}s"
-        )
-        print(
-            f"Qdrant upsert time:    "
-            f"{total_qdrant_time:.3f}s"
-        )
-
-        print("=" * 70 + "\n")
-
         return {
             "repository_id": repository_id,
-            "chunks_indexed": total_indexed,
-            "total_time": total_time,
+            "chunks_indexed": indexed_now,
+            "vectors_total": vectors_total,
+            "chunks_total": len(chunks),
+            "remaining": remaining,
+            "done": remaining == 0,
+            "total_time": round(elapsed, 2),
         }
 
     @staticmethod

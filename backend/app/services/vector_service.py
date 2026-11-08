@@ -74,6 +74,31 @@ class VectorService:
             ),
         )
 
+    def existing_ids(self, repository_id: int) -> set[int]:
+        """IDs (chunk IDs) of every vector stored for the repository."""
+        repository_filter = Filter(
+            must=[FieldCondition(key="repository_id", match=MatchValue(value=repository_id))]
+        )
+        ids: set[int] = set()
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.COLLECTION_NAME,
+                scroll_filter=repository_filter,
+                limit=1000,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            ids.update(int(point.id) for point in points)
+            if offset is None:
+                return ids
+
+    def delete_ids(self, ids) -> None:
+        ids = [int(i) for i in ids]
+        if ids:
+            self.client.delete(collection_name=self.COLLECTION_NAME, points_selector=ids)
+
     def count_repository(self, repository_id: int) -> int:
         repository_filter = Filter(
             must=[

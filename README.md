@@ -218,9 +218,11 @@ POST /repositories/{id}/index
 # 3. Create semantic chunks
 POST /repositories/{id}/chunks
 
-# 4. Generate embeddings and store vectors
-POST /repositories/{id}/vector-index
+# 4. Generate embeddings and store vectors (repeat until "done": true)
+POST /repositories/{id}/vector-index?time_budget_seconds=60
 ```
+
+Step 4 is resumable. Each call embeds for about `time_budget_seconds` (default 60), skips chunks that already have vectors, and returns `vectors_total`, `chunks_total`, `remaining` and `done`. Repeat the call until `done` is true. The web UI does this automatically and shows progress, so large repositories never hit request timeouts, and an interrupted run continues where it stopped.
 
 For a medium-sized repository (~150 files):
 - Steps 1–3: ~30 seconds

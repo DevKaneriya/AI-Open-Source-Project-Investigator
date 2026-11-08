@@ -188,6 +188,17 @@ def run_pipeline(
                     repo = api_client.add_repository(clone_url or "")
                     name = repo.get("name") or name
                     summary = "cloned"
+                elif step.stage == "indexed":
+                    # Embedding runs in short resumable calls; show progress between them.
+                    note = st.empty()
+
+                    def show(r: dict[str, Any], note=note) -> None:
+                        if r.get("chunks_total"):
+                            note.caption(f"… {r.get('vectors_total', 0):,} of {r['chunks_total']:,} chunks embedded")
+
+                    result = api_client.index_vectors(int(repo["id"]), on_progress=show)
+                    note.empty()
+                    summary = _summarize(step.stage, result)
                 else:
                     result = _step_call(api_client, step.stage)(int(repo["id"]))
                     summary = _summarize(step.stage, result)

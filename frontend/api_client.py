@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlencode
 import requests
 from requests.exceptions import ConnectionError as ReqConnectionError
@@ -268,15 +268,43 @@ class ApiClient:
             timeout=120.0,
         )
 
-    def index_vectors(self, repository_id: int) -> dict[str, Any]:
+    VECTOR_TIME_BUDGET = 60.0  # seconds of embedding per request
+
+    def index_vectors(
+        self,
+        repository_id: int,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """
-        Generate BGE embeddings and index chunks into Qdrant via POST /repositories/{id}/vector-index.
+        Embed chunks via POST /repositories/{id}/vector-index, one short call at a time.
+
+        The backend embeds for about VECTOR_TIME_BUDGET seconds per call and skips
+        chunks that already have vectors, so this repeats until it reports done.
+        A timed-out or interrupted run resumes instead of starting over.
+        ``on_progress`` receives each call's result (vectors_total, chunks_total, ...).
         """
-        return self._request(
-            "POST",
-            f"/repositories/{repository_id}/vector-index",
-            timeout=240.0,
-        )
+        stalled = 0
+        while True:
+            result = self._request(
+                "POST",
+                f"/repositories/{repository_id}/vector-index",
+                params={"time_budget_seconds": self.VECTOR_TIME_BUDGET},
+                # The budget is checked between batches, plus model loading on a cold start.
+                timeout=self.VECTOR_TIME_BUDGET + 180.0,
+            )
+            if on_progress:
+                on_progress(result)
+            # Older backends embed everything in one call and don't report "done".
+            if result.get("done", True):
+                result["chunks_indexed"] = result.get("vectors_total", result.get("chunks_indexed"))
+                return result
+            stalled = stalled + 1 if not result.get("chunks_indexed") else 0
+            if stalled >= 3:
+                raise ApiClientError(
+                    f"Embedding made no progress: {result.get('remaining')} of "
+                    f"{result.get('chunks_total')} chunks are still without vectors.",
+                    response_body=result,
+                )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Investigation

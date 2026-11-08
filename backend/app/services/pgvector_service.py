@@ -96,6 +96,21 @@ class PgVectorService:
                 {"repository_id": repository_id},
             )
 
+    def existing_ids(self, repository_id: int) -> set[int]:
+        """IDs (chunk IDs) of every vector stored for the repository."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(f"SELECT id FROM {self.TABLE_NAME} WHERE repository_id = :repository_id"),
+                {"repository_id": repository_id},
+            )
+            return {int(row.id) for row in rows}
+
+    def delete_ids(self, ids) -> None:
+        ids = [int(i) for i in ids]
+        if ids:
+            with self.engine.begin() as conn:
+                conn.execute(text(f"DELETE FROM {self.TABLE_NAME} WHERE id = ANY(:ids)"), {"ids": ids})
+
     def count_repository(self, repository_id: int) -> int:
         with self.engine.connect() as conn:
             return conn.execute(
