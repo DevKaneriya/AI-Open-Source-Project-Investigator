@@ -6,7 +6,7 @@ An agentic code-analysis system that understands repository architecture, traces
 
 ## What It Does
 
-Point the system at any public GitHub repository. After indexing, ask natural-language questions and get answers backed by cited source snippets — not guesses.
+Point the system at any public GitHub repository. After indexing, ask natural-language questions and get answers backed by cited source snippets, not guesses.
 
 **Example questions:**
 - *"How does the checkout flow work from the Angular UI to the Django backend?"*
@@ -14,19 +14,28 @@ Point the system at any public GitHub repository. After indexing, ask natural-la
 - *"What are the exact Angular and Django versions?"*
 - *"How is Razorpay payment verification implemented?"*
 
+**Highlights:**
+- **Web UI (Streamlit):** add a repository and it's cloned and indexed in one step, then ask questions and inspect every cited snippet.
+- **Agentic workflow (LangGraph):** retrieves evidence, and runs a targeted follow-up round if something is missing, then verifies every citation against the real code and repairs bad ones.
+- **Clear failures:** any error in the UI opens a pop-up explaining what failed, what to try, and (for the owner) the full technical details, with an error ID that matches the server logs.
+- **Free public demo mode:** visitors can only ask questions, with rate limits; repository management is password-protected. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 ---
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| API | FastAPI (Python) |
-| Database | PostgreSQL + SQLAlchemy 2.0 |
+| Web UI | Streamlit |
+| API | FastAPI (Python 3.12) |
+| Agent workflow | LangGraph |
+| Database | PostgreSQL + SQLAlchemy 2.x |
 | Migrations | Alembic |
-| Vector DB | Qdrant (local file mode) |
+| Vector store | Qdrant (local file mode) locally, or pgvector in PostgreSQL when hosted |
 | Embeddings | `BAAI/bge-small-en-v1.5` (sentence-transformers) |
 | LLM | Groq API (configurable model) |
-| Parsing | Tree-sitter + Python AST |
+| Parsing | Python AST + Tree-sitter (JavaScript/TypeScript) |
+| Hosting | Streamlit Community Cloud + Neon (free) |
 
 ---
 
@@ -36,64 +45,79 @@ Point the system at any public GitHub repository. After indexing, ask natural-la
 AI-OpenSource-Project-Investigator/
 ├── backend/
 │   ├── alembic/                    # Database migrations
-│   │   ├── env.py                  # Migration environment
-│   │   └── versions/               # Migration files
+│   │   ├── env.py
+│   │   └── versions/
 │   ├── app/
 │   │   ├── main.py                 # FastAPI app + all endpoints
 │   │   ├── core/
 │   │   │   ├── config.py           # Pydantic settings (reads .env)
 │   │   │   └── database.py         # SQLAlchemy engine + session
-│   │   ├── models/                 # SQLAlchemy ORM models
+│   │   ├── models/                 # SQLAlchemy ORM models + response schemas
 │   │   │   ├── repository.py
 │   │   │   ├── repository_file.py
 │   │   │   ├── code_symbol.py
 │   │   │   ├── code_chunk.py
 │   │   │   ├── code_call.py
 │   │   │   ├── code_import.py
-│   │   │   ├── query_analysis.py   # Pydantic schema for LLM output
-│   │   │   └── investigation_answer.py  # Response schema
+│   │   │   ├── query_analysis.py         # Question types + LLM output schema
+│   │   │   └── investigation_answer.py   # Investigation response schema
 │   │   └── services/
-│   │       ├── retrieval_service.py           # Main orchestrator
-│   │       ├── query_analyzer_service.py      # LLM + fallback
-│   │       ├── answer_generation_service.py   # Evidence-grounded answers
-│   │       ├── evidence_collector_service.py  # Merge + rank evidence
-│   │       ├── architectural_file_service.py  # Find key files
-│   │       ├── code_search_service.py         # Symbol DB search
-│   │       ├── repository_search_service.py   # Full-text file search
-│   │       ├── semantic_search_service.py     # Qdrant vector search
-│   │       ├── code_relationship_service.py   # Call graph queries
-│   │       ├── code_retrieval_service.py      # Source extraction
-│   │       ├── code_indexer.py                # Parse + index
-│   │       ├── code_chunk_service.py          # Chunking
-│   │       ├── code_analyzer.py               # Python AST
-│   │       ├── tree_sitter_analyzer.py        # JS/TS AST
-│   │       ├── embedding_service.py           # sentence-transformers
-│   │       ├── vector_service.py              # Qdrant client
-│   │       ├── vector_indexing_service.py     # Embed + upsert chunks
-│   │       ├── github_service.py              # Clone repos
-│   │       ├── repository_scanner.py          # File discovery
-│   │       ├── repository_service.py          # Repo CRUD
-│   │       ├── language_service.py            # Extension → language
-│   │       ├── file_filter_service.py         # Exclusion rules
-│   │       ├── import_search_service.py       # Import DB search
-│   │       └── search_normalizer.py           # Query normalisation
+│   │       ├── investigation_graph.py             # LangGraph workflow (orchestrator)
+│   │       ├── repository_investigation_service.py
+│   │       ├── query_analyzer_service.py          # LLM classification + fallback
+│   │       ├── retrieval_service.py               # Runs all searches for a round
+│   │       ├── evidence_collector_service.py      # Merge, dedupe, rank evidence
+│   │       ├── evidence_evaluation_service.py     # Is the evidence sufficient?
+│   │       ├── evidence_signals.py
+│   │       ├── answer_generation_service.py       # Evidence-grounded answers
+│   │       ├── citation_validation_service.py     # Checks citations against code
+│   │       ├── llm_service.py                     # Groq client
+│   │       ├── architectural_file_service.py      # Finds manifests, entry points, config
+│   │       ├── code_search_service.py             # Symbol search
+│   │       ├── repository_search_service.py       # Full-text search
+│   │       ├── import_search_service.py           # Import search
+│   │       ├── semantic_search_service.py         # Vector search
+│   │       ├── code_relationship_service.py       # Call graph queries
+│   │       ├── code_retrieval_service.py          # Source extraction
+│   │       ├── code_indexer.py                    # Parse + index symbols
+│   │       ├── code_analyzer.py                   # Python AST
+│   │       ├── tree_sitter_analyzer.py            # JavaScript/TypeScript
+│   │       ├── code_chunk_service.py              # Chunking
+│   │       ├── embedding_service.py               # sentence-transformers
+│   │       ├── vector_service.py                  # Qdrant or pgvector, chosen by VECTOR_BACKEND
+│   │       ├── pgvector_service.py                # pgvector implementation
+│   │       ├── vector_indexing_service.py         # Embed + store chunks
+│   │       ├── github_service.py                  # Clone repositories
+│   │       ├── repository_workspace.py            # Re-downloads missing checkouts
+│   │       ├── repository_scanner.py              # File discovery
+│   │       ├── repository_service.py              # Repository CRUD + indexing stage
+│   │       ├── language_service.py                # Extension → language
+│   │       ├── file_filter_service.py             # Exclusion rules
+│   │       └── search_normalizer.py               # Query normalisation
 │   ├── scripts/
 │   │   ├── reindex.py              # Re-index a repository
 │   │   ├── run_regression.py       # Run 10 benchmark queries
 │   │   ├── verify_schema.py        # Check DB matches models
-│   │   ├── apply_migrations.ps1    # Apply pending migrations
-│   │   └── create_migration.ps1    # Generate a new migration
-│   └── tests/
-│       ├── test_query_analyzer_service.py  # 25 tests
-│       ├── test_evidence_grounding.py      # 16 tests
-│       ├── test_llm_service.py             # 15 tests
-│       └── test_service_units.py           # 40 tests
-├── data/
-│   └── qdrant/                     # Qdrant local storage
-├── alembic.ini                     # Alembic config
-├── requirements.txt
-├── check_data.py                   # Inspect indexed DB stats
-├── check_relationships.py          # Inspect call graph data
+│   │   ├── apply_migrations.ps1
+│   │   ├── create_migration.ps1
+│   │   └── test_migrations.ps1
+│   └── tests/                      # pytest suite (13 files)
+├── frontend/
+│   ├── streamlit_app.py            # UI entry point (local development)
+│   ├── api_client.py               # HTTP client for the FastAPI backend
+│   ├── components/                 # Pages: investigate, repositories, guide, status, sidebar
+│   ├── utils/                      # Error pop-ups, demo access, pipeline, history, navigation
+│   ├── assets/styles.css
+│   └── requirements.txt            # UI-only dependencies
+├── .streamlit/config.toml          # UI theme and server settings
+├── streamlit_app.py                # Hosted entry point (Streamlit Community Cloud)
+├── deploy/                         # Docker/Hugging Face scripts + pinned versions
+│   └── constraints.txt             # Exact tested package versions
+├── docs/DEPLOYMENT.md              # Free hosting guide
+├── Dockerfile                      # Single-container image (API + UI)
+├── data/qdrant/                    # Local Qdrant storage (not committed)
+├── alembic.ini
+├── requirements.txt                # All dependencies (API, UI, tests)
 ├── start_server.ps1
 ├── start_server_dev.ps1
 ├── stop_server.ps1
@@ -106,16 +130,21 @@ AI-OpenSource-Project-Investigator/
 
 ### 1. Prerequisites
 
-- Python 3.12+
+- Python 3.12
 - PostgreSQL running locally
-- `uv` package manager (`pip install uv`)
 - Groq API key (free at [console.groq.com](https://console.groq.com))
 
 ### 2. Install Dependencies
 
+Create the virtual environment in `.venv` (the start scripts expect that folder), then install everything at the tested versions:
+
 ```powershell
-uv pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt -c deploy/constraints.txt
 ```
+
+`requirements.txt` covers the API, the web UI and the tests.
 
 ### 3. Configure Environment
 
@@ -130,7 +159,7 @@ GROQ_API_KEY=your_groq_api_key_here
 QUERY_ANALYZER_MODEL=llama-3.3-70b-versatile
 ```
 
-> Qdrant runs in local file mode — no server needed. Data is stored in `data/qdrant/`.
+> Qdrant runs in local file mode, so no server is needed. Data is stored in `data/qdrant/`.
 
 ### 4. Set Up Database
 
@@ -139,7 +168,7 @@ QUERY_ANALYZER_MODEL=llama-3.3-70b-versatile
 .venv\Scripts\alembic.exe upgrade head
 ```
 
-### 5. Start the Server
+### 5. Start the API
 
 ```powershell
 # Development (with auto-reload)
@@ -149,18 +178,28 @@ QUERY_ANALYZER_MODEL=llama-3.3-70b-versatile
 .\start_server.ps1
 ```
 
-Server runs at `http://localhost:8000`. API docs at `http://localhost:8000/docs`.
+The API runs at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
 
 ### 6. Start the Web UI
 
+In a second terminal, from the project folder:
+
 ```powershell
-pip install -r frontend/requirements.txt
+.venv\Scripts\Activate.ps1
 streamlit run frontend/streamlit_app.py --server.port 8501
 ```
 
-Open `http://localhost:8501`. On first visit the **Getting started** page shows a live setup checklist. Add a repository on the **Repositories** page and it is cloned and indexed in one step. Once it shows **Ready**, ask questions on **Investigate**.
+Open `http://localhost:8501`. On first visit the **Getting started** page shows a live setup checklist. Add a repository on the **Repositories** page and it's cloned and indexed in one step. Once it shows **Ready**, ask questions on **Investigate** (press **Ctrl+Enter** or click **Investigate** to submit).
 
-To host a free public demo, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+If something fails, a pop-up explains what went wrong and what to try. Locally you always see the full technical details.
+
+---
+
+## Deployment
+
+The public demo runs for free, with no credit card, on **Streamlit Community Cloud** (UI + API in one app) and **Neon** (PostgreSQL + pgvector). Pushing to `main` redeploys automatically.
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the step-by-step guide, including secrets, demo mode and a paid Hugging Face alternative.
 
 ---
 
@@ -179,7 +218,7 @@ POST /repositories/{id}/index
 # 3. Create semantic chunks
 POST /repositories/{id}/chunks
 
-# 4. Generate embeddings and index in Qdrant
+# 4. Generate embeddings and store vectors
 POST /repositories/{id}/vector-index
 ```
 
@@ -199,20 +238,19 @@ python backend/scripts/reindex.py --repo-id 1 --skip-vectors
 
 ## API Reference
 
-### Investigate Endpoints
+### Investigation
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/repositories/{id}/investigate` | Single evidence-grounded investigation |
+| `GET` | `/repositories/{id}/investigate?query=...` | Single evidence-grounded investigation (LangGraph workflow) |
 | `POST` | `/repositories/{id}/investigate/bulk` | Up to 10 queries in one request |
 
 **Single investigation:**
 ```bash
-POST /repositories/1/investigate
-Body: {"query": "How does the checkout flow work?"}
+GET /repositories/1/investigate?query=How does the checkout flow work?
 ```
 
-**Bulk investigation:**
+**Bulk investigation** (`delay_between_queries` defaults to 2.0 seconds):
 ```bash
 POST /repositories/1/investigate/bulk?delay_between_queries=3.0
 Body: [
@@ -222,90 +260,88 @@ Body: [
 ]
 ```
 
-Response includes per-query `stage_times` (retrieval, answer generation) and a summary with `avg_stage_times`.
+The bulk response includes per-query `stage_times` (retrieval, answer generation), a summary with `avg_stage_times`, and `rate_limit_hit`.
 
-### Retrieval Endpoint
-
-```bash
-GET /repositories/{id}/retrieve?query=How does auth work?&semantic_limit=10
-```
-
-Returns raw ranked evidence — useful for debugging what the system finds before LLM answer generation.
-
-### Indexing Endpoints
+### Repositories and Indexing
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/repositories` | List repositories with stage and counts |
 | `POST` | `/repositories` | Clone a repository |
+| `DELETE` | `/repositories/{id}` | Delete a repository and its index, chunks and vectors |
 | `POST` | `/repositories/{id}/index` | Parse and index symbols |
 | `POST` | `/repositories/{id}/chunks` | Create semantic chunks |
-| `POST` | `/repositories/{id}/vector-index` | Embed chunks into Qdrant |
+| `POST` | `/repositories/{id}/vector-index` | Embed chunks and store vectors |
+| `POST` | `/repositories/scan` | Quick architecture scan of a URL without indexing |
 
-### Search Endpoints
+### Search and Debugging
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/repositories/{id}/retrieve?query=...&limit=10` | Raw ranked evidence, before answer generation |
 | `GET` | `/repositories/{id}/search` | Symbol search |
 | `GET` | `/repositories/{id}/search-text` | Full-text search |
-| `GET` | `/repositories/{id}/semantic-search` | Vector similarity search |
+| `GET` | `/repositories/{id}/semantic-search?query=...&limit=10` | Vector similarity search |
 | `GET` | `/repositories/{id}/relationships/calls` | Call graph for a symbol |
-| `GET` | `/repositories/{id}/source` | Raw source extraction |
+| `GET` | `/repositories/{id}/source` | Source extraction by file and line range |
 | `GET` | `/query-analyze` | Test query classification |
+| `GET` | `/health` | Health check |
+
+### Errors
+
+Endpoints report expected problems (for example "Repository not found") as HTTP errors with a `detail` message. Any unexpected server error returns HTTP 500 with JSON like:
+
+```json
+{"detail": "ValueError: ...", "error_type": "ValueError", "error_id": "7c884b3a", "path": "/repositories/1/index"}
+```
+
+The same `error_id` is written to the server log with the full traceback.
 
 ---
 
-## How Retrieval Works
+## How an Investigation Works
 
-Every query goes through this pipeline:
+Every question runs through a LangGraph state machine with bounded loops:
 
 ```
-User query
+User question
     │
     ▼
-Query Analyzer  ──── LLM classifies type + extracts search terms
-    │                 Falls back to deterministic extraction on LLM failure
+analyze_query ─────── LLM classifies the question type and extracts search terms
+    │                 (falls back to deterministic extraction if the LLM fails)
+    ▼
+plan_retrieval ◄──────────────────────────────┐
+    │                                         │
+    ▼                                         │
+retrieve_evidence ─── symbol, full-text,      │
+    │                 import, semantic and    │
+    │                 call-graph searches     │
+    ▼                                         │
+collect_rank_evidence ─ merge, dedupe, score, │
+    │                   keep the top 12       │
+    ▼                                         │
+evaluate_evidence ── not enough evidence? ────┘  (at most 1 follow-up round)
     │
     ▼
-Question type router
-    │
-    ├─── DEPENDENCY_ANALYSIS / ARCHITECTURAL_OVERVIEW
-    │        └─► Staged: discover manifests + config files first
-    │
-    ├─── FEATURE_FLOW / END_TO_END_FLOW
-    │        └─► Standard + follow called functions (targeted flow retrieval)
-    │
-    └─── SYMBOL_LOOKUP / all others
-             └─► Standard search only
+generate_answer ───── evidence-grounded answer with [E#] citations
     │
     ▼
-Parallel searches
-    ├── Symbol DB search  (exact + fuzzy identifier matching)
-    ├── Full-text search  (grep across all repository files)
-    ├── Import search     (module/package references)
-    └── Semantic search   (Qdrant vector similarity)
+validate_citations ── every citation checked against the actual code
     │
+    ├── problems found → repair_answer (at most 1 attempt)
     ▼
-Evidence Collector
-    ├── Merge architectural files into candidate pool
-    ├── Deduplicate by file + line range
-    ├── Score each candidate (base score by source type)
-    ├── Apply architectural bonuses (manifests, config, README)
-    └── Select top 12 evidence items
-    │
-    ▼
-Answer Generation (LLM)
-    └── Evidence-grounded answer with inline citations
+finalize_response ─── answer, citations, confidence, limitations, diagnostics
 ```
 
 ### Question Types
 
 | Type | Example | Strategy |
 |---|---|---|
-| `symbol_lookup` | "Where is CartSyncView defined?" | Symbol search only |
+| `symbol_lookup` | "Where is CartSyncView defined?" | Symbol search |
 | `call_site_lookup` | "Where is addToCart called?" | Symbol + relationships |
 | `file_explanation` | "What does views.py do?" | Source + semantic |
 | `feature_flow` | "How does checkout work?" | All sources + follow calls |
-| `architectural_overview` | "Explain this project" | Staged architectural files |
+| `architectural_overview` | "Explain this project" | Architectural files first |
 | `end_to_end_flow` | "Trace a request frontend to DB" | All sources + follow calls |
 | `cross_cutting_concern` | "How is caching implemented?" | Config + all sources |
 | `dependency_analysis` | "What Angular version is used?" | Manifests first |
@@ -319,7 +355,7 @@ Base scores:
   text_match      → 0.82   grep match
   import          → 0.68   import statement
   relationship    → 0.66   call graph entry
-  semantic        → 0.35–0.70  vector similarity
+  semantic        → 0.35–0.70  scaled by vector similarity
 
 Architectural bonuses (added on top):
   package manifests   → +0.45  (dependency questions)
@@ -333,11 +369,12 @@ Architectural bonuses (added on top):
 
 ## Evidence-Grounded Answers
 
-The `investigate` endpoints generate answers using an LLM constrained to the retrieved evidence. The system:
+Answers are generated by an LLM constrained to the retrieved evidence. The system:
 
 - Cites every claim with evidence IDs (E1, E2, …)
 - Refuses to invent code, functions, or side effects not in evidence
 - Distinguishes confirmed code from docstring intentions
+- Verifies citations against the source and repairs mismatches
 - Reports `confidence: high / partial / insufficient`
 - Lists specific limitations when evidence is incomplete
 
@@ -366,46 +403,43 @@ The `investigate` endpoints generate answers using an LLM constrained to the ret
 }
 ```
 
+The full response also includes `metadata` with workflow diagnostics (retrieval rounds, citation repairs, stage timings), shown in the UI under **Investigation diagnostics**.
+
 ---
 
 ## Query Analysis with Fallback
 
-The query analyzer uses a compact JSON schema (not the full Pydantic `$defs` output) to stay well within the LLM token budget. On any LLM failure, a deterministic fallback activates:
+The query analyzer uses a compact JSON schema to stay well within the LLM token budget. On any LLM failure, a deterministic fallback activates:
 
 - Extracts CamelCase/snake_case identifiers → `symbol_queries`
 - Strips stopwords → `text_queries`
-- Classifies type from keywords (no LLM needed)
-- Investigation continues — never aborts on query analysis failure
+- Classifies the type from keywords (no LLM needed)
+- The investigation continues; it never aborts on a query analysis failure
 
-Responses marked `[FALLBACK]` in bulk results indicate the LLM was unavailable for that query.
+When the fallback was used, the analysis `intent` starts with `[fallback]`.
 
 ---
 
 ## Supported File Types
 
-The indexer parses and indexes these file types for symbols:
+Symbols (functions, classes, imports, calls) are extracted from:
 
 | Extension | Language | Symbol Extraction |
 |---|---|---|
-| `.py` | Python | AST (full: functions, classes, decorators, calls) |
+| `.py` | Python | Python AST (functions, classes, decorators, calls) |
+| `.js`, `.jsx`, `.mjs`, `.cjs` | JavaScript | Tree-sitter |
 | `.ts`, `.tsx` | TypeScript | Tree-sitter |
-| `.js`, `.jsx` | JavaScript | Tree-sitter |
-| `.java` | Java | Tree-sitter |
-| `.go` | Go | Tree-sitter |
-| `.cs` | C# | Tree-sitter |
-| `.cpp`, `.cc`, `.c` | C/C++ | Tree-sitter |
-| `.rs` | Rust | Tree-sitter |
-| `.php` | PHP | Tree-sitter |
-| `.rb` | Ruby | Tree-sitter |
 
-These file types are indexed for content but have no symbol extraction (full-text and semantic search still work):
+These files are indexed for content only, with no symbol extraction. Full-text and semantic search still work on them:
 
 | Extension | Type |
 |---|---|
-| `.json` | Dependency manifests (package.json, etc.) |
-| `.txt` | Plain text (requirements.txt, etc.) |
-| `.toml` | Config (pyproject.toml, etc.) |
-| `.yaml`, `.yml` | Config files |
+| `.java`, `.go`, `.cs`, `.cpp`, `.cc`, `.c`, `.rs`, `.php`, `.rb` | Other source code |
+| `.json`, `.jsonc` | Dependency manifests (package.json, etc.) |
+| `.txt`, `.env` | Plain text (requirements.txt, etc.) |
+| `.toml`, `.yaml`, `.yml` | Config files |
+| `.sql` | Schemas and migrations |
+| `.md`, `.mdx`, `.rst` | Documentation (chunked by heading) |
 
 **Excluded automatically:** `node_modules/`, `.venv/`, `dist/`, `build/`, lock files (`package-lock.json`, `yarn.lock`), compiled files (`.pyc`, `.min.js`), binary files, files over 1 MB.
 
@@ -413,7 +447,7 @@ These file types are indexed for content but have no symbol extraction (full-tex
 
 ## Database Migrations
 
-This project uses Alembic for schema migrations.
+This project uses Alembic for schema migrations. The hosted app applies them automatically on startup.
 
 ```powershell
 # Check current migration version
@@ -439,7 +473,7 @@ python backend\scripts\verify_schema.py
 
 | Revision | Description |
 |---|---|
-| `577189d69fe0` | Initial migration — all models |
+| `577189d69fe0` | Initial migration with all models |
 | `aeb8eee804c4` | Add `updated_at` to repositories, index on `url` |
 
 ---
@@ -449,27 +483,34 @@ python backend\scripts\verify_schema.py
 ### Run All Tests
 
 ```powershell
-python -m pytest backend/tests/ -v
+python -m pytest backend/tests/ -q
 ```
 
-96 tests, ~4 seconds.
+354 tests (4 skipped without a pgvector database), about a minute.
 
 ### Test Coverage
 
-| Test File | Count | Covers |
-|---|---|---|
-| `test_query_analyzer_service.py` | 25 | LLM responses, truncation, fallback, retry |
-| `test_service_units.py` | 40 | Language detection, file filtering, retrieval, evidence ranking |
-| `test_evidence_grounding.py` | 16 | Evidence validation, prompt guidance, citations |
-| `test_llm_service.py` | 15 | Groq client, model modes, error handling |
+| Test File | Covers |
+|---|---|
+| `test_investigation_graph.py`, `test_investigation_graph_bugs.py` | LangGraph workflow, loops, termination |
+| `test_answer_generation.py`, `test_evidence_grounding.py` | Grounded answers, prompts, citations |
+| `test_query_analyzer_service.py` | LLM responses, truncation, fallback, retry |
+| `test_llm_service.py` | Groq client, model modes, error handling |
+| `test_service_units.py` | Language detection, file filtering, retrieval, evidence ranking |
+| `test_reliability_regressions.py`, `test_crumbs_followup_regressions.py`, `test_evaluator_false_positive_regressions.py` | Regressions found on real repositories |
+| `test_repository_stage.py` | Indexing stage tracking |
+| `test_frontend.py` | Streamlit UI helpers and API client |
+| `test_deployment.py` | Database URL handling, pgvector store, re-cloning missing checkouts, demo-mode safeguards |
+
+Set `PGVECTOR_TEST_URL` to a PostgreSQL database with the `vector` extension to run the skipped pgvector tests.
 
 ### Regression Benchmark
 
 Runs the same 10 queries against an indexed repository and reports success rate, confidence, citation count, and per-stage timing:
 
 ```powershell
-# Server must be running
-python backend/scripts/run_regression.py --delay 3.0
+# API must be running
+python backend/scripts/run_regression.py --repo-id 1 --delay 3.0
 ```
 
 **Baseline results (Crumbs repository, 10 queries):**
@@ -485,67 +526,64 @@ python backend/scripts/run_regression.py --delay 3.0
 
 ---
 
-## Utilities
-
-```powershell
-# Inspect indexed database stats
-python check_data.py
-
-# Inspect call graph relationships
-python check_relationships.py
-
-# Re-index a repository after investigator code changes
-python backend/scripts/reindex.py --repo-id 1
-
-# Skip slow vector re-embedding (use after symbol-only changes)
-python backend/scripts/reindex.py --repo-id 1 --skip-vectors
-```
-
----
-
 ## Configuration Reference
 
-### `.env` Variables
+### `.env` Variables (local development)
 
 ```bash
 # Required
 DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/dbname
 GROQ_API_KEY=your_groq_api_key
 
-# Optional — defaults shown
+# Optional (defaults shown)
 APP_ENV=development
 APP_NAME=AI Open-Source Project Investigator
-QUERY_ANALYZER_MODEL=llama-3.3-70b-versatile
-
-# Not required (Qdrant runs in local file mode)
-# VECTOR_DB_URL=
-# VECTOR_DB_API_KEY=
+QUERY_ANALYZER_MODEL=openai/gpt-oss-120b   # .env.example sets llama-3.3-70b-versatile
+VECTOR_BACKEND=qdrant                      # or pgvector (vectors in PostgreSQL)
+API_BASE_URL=http://127.0.0.1:8000         # where the UI finds the API
 ```
+
+`DATABASE_URL` also accepts `postgres://` and `postgresql://` URLs. Other keys in `.env.example` (`GITHUB_TOKEN`, `REDIS_URL`, `VECTOR_DB_URL`, ...) are reserved and not used yet.
+
+### Public Demo Variables
+
+Set these as secrets on the hosting platform (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)):
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `DEMO_MODE` | Visitors can only ask questions; management needs the admin password | off locally, on when hosted |
+| `ADMIN_PASSWORD` | Unlocks repository management (sidebar → *Owner access*) | none (required when hosted) |
+| `DEMO_SESSION_QUERIES` | Questions per visitor per hour | 8 |
+| `DEMO_QUERIES_PER_HOUR` | Questions per hour across all visitors | 40 |
 
 ### Groq Model Selection
 
-The system is tested with these models on Groq:
+The structured-output mode is chosen per model:
 
-| Model | Structured output | Notes |
-|---|---|---|
-| `llama-3.3-70b-versatile` | json_object | Recommended default |
-| `qwen/qwen3.8-27b` | json_schema | Full schema support |
-| `openai/gpt-oss-20b` | json_object | Faster, less accurate |
-| `openai/gpt-oss-120b` | prompt injection only | Use only if others unavailable |
+| Model | Structured output |
+|---|---|
+| `qwen/qwen3.8-27b` | json_schema |
+| `openai/gpt-oss-20b` | json_object |
+| `openai/gpt-oss-120b` | prompt only (no `response_format`) |
+| any other model, e.g. `llama-3.3-70b-versatile` | json_schema |
 
-Change model with `QUERY_ANALYZER_MODEL=model-name` in `.env`.
+Change the model with `QUERY_ANALYZER_MODEL=model-name` in `.env`.
 
 ---
 
 ## Known Limitations
 
-1. **Short symbol bodies may be truncated** — when a class body spans many lines, the LLM answer-generation token budget may cut off the explanation before the full method body.
+1. **Long symbol bodies may be truncated.** When a class body spans many lines, the answer-generation token budget may cut off the explanation before the full method body.
 
-2. **Database-config questions** — queries phrased broadly ("explain the db config") are sometimes classified as `feature_flow` rather than `cross_cutting_concern`, so `settings.py` may not receive its full architectural bonus. Rephrase as *"How is the database configured in settings.py?"* for best results.
+2. **Database-config questions.** Queries phrased broadly ("explain the db config") are sometimes classified as `feature_flow` rather than `cross_cutting_concern`, so `settings.py` may not receive its full architectural bonus. Rephrase as *"How is the database configured in settings.py?"* for best results.
 
-3. **Absence claims** — when a symbol is not found, the system reports coverage limitations rather than asserting repository-wide absence, since some file types or dynamically generated code may not be indexed.
+3. **Absence claims.** When a symbol is not found, the system reports coverage limitations rather than asserting repository-wide absence, since some file types or dynamically generated code may not be indexed.
 
-4. **Rate limits** — Groq free tier: 200k tokens/day. Each investigation query costs ~2,000–8,000 tokens. Use `delay_between_queries=3.0` in bulk requests to stay within rate limits.
+4. **Symbols only for Python and JavaScript/TypeScript.** Other languages are searchable by text and meaning, but symbol and call-graph questions work best on those three.
+
+5. **Rate limits.** Groq's free tier has daily token limits, and each investigation uses several thousand tokens. Use `delay_between_queries=3.0` or more in bulk requests.
+
+6. **Hosted memory.** Streamlit Community Cloud's free tier has limited memory, so very large repositories may fail to index there.
 
 ---
 
@@ -553,27 +591,31 @@ Change model with `QUERY_ANALYZER_MODEL=model-name` in `.env`.
 
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for a full list.
 
-**Qdrant lock error** — another process (or the server) holds the file lock:
+**Error pop-up in the UI.** Read *What you can try* first. The error ID in the pop-up matches the log entry (UI log, or the API log for server errors).
+
+**Qdrant lock error.** Another process (or the server) holds the file lock:
 ```powershell
 .\stop_server.ps1
 ```
 
-**Empty evidence** — repository not yet indexed or index is stale:
+**Empty evidence.** The repository isn't indexed yet, or the index is stale:
 ```powershell
 python backend/scripts/reindex.py --repo-id 1
 ```
 
-**Query analysis failures** — the system falls back to deterministic extraction and continues. Check server logs for `[fallback]` markers.
+**Query analysis failures.** The system falls back to deterministic extraction and continues. Check the server logs for `[fallback]` markers.
 
-**Rate limit hit** — bulk endpoint automatically skips remaining queries and reports `rate_limit_hit: true`. Wait for quota reset (Groq resets daily) or reduce batch size.
+**Rate limit hit.** The bulk endpoint skips the remaining queries and reports `rate_limit_hit: true`. Wait for the quota to reset or reduce the batch size.
 
 ---
 
 ## Acknowledgements
 
-- [Tree-sitter](https://tree-sitter.github.io/) — incremental parsing
-- [Qdrant](https://qdrant.tech/) — vector database
-- [Groq](https://groq.com/) — LLM inference
-- [FastAPI](https://fastapi.tiangolo.com/) — web framework
-- [sentence-transformers](https://sbert.net/) — embeddings
-- [SQLAlchemy](https://sqlalchemy.org/) + [Alembic](https://alembic.sqlalchemy.org/) — ORM and migrations
+- [Tree-sitter](https://tree-sitter.github.io/): incremental parsing
+- [LangGraph](https://langchain-ai.github.io/langgraph/): agent workflow
+- [Qdrant](https://qdrant.tech/) and [pgvector](https://github.com/pgvector/pgvector): vector search
+- [Groq](https://groq.com/): LLM inference
+- [FastAPI](https://fastapi.tiangolo.com/): web framework
+- [Streamlit](https://streamlit.io/): web UI
+- [sentence-transformers](https://sbert.net/): embeddings
+- [SQLAlchemy](https://sqlalchemy.org/) + [Alembic](https://alembic.sqlalchemy.org/): ORM and migrations
