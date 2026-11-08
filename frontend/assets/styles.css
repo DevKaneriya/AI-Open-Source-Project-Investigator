@@ -385,6 +385,13 @@ div[data-testid="stMetricValue"] { font-size: 1.35rem; }
 div[data-testid="stExpander"] details summary p { overflow-wrap: anywhere; }
 div[data-testid="stCode"] pre { max-width: 100%; }
 
+/* Admin password (narrow sidebar): Streamlit's "Press Enter to submit form"
+   hint overlaps the typed text and the show-password icon, so hide it here.
+   Enter still submits; the Unlock button sits right below. */
+.st-key-admin_password_input [data-testid="InputInstructions"] {
+  display: none;
+}
+
 /* Investigate question box: a multi-line area (Ctrl/Cmd+Enter submits). */
 .st-key-query_input_area [data-baseweb="textarea"] {
   border-radius: var(--oi-radius);

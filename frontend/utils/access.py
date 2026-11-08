@@ -61,7 +61,7 @@ def render_admin_controls() -> None:
 
     with st.expander("Owner access", icon=":material/admin_panel_settings:"):
         with st.form("admin_unlock_form", border=False):
-            password = st.text_input("Admin password", type="password")
+            password = st.text_input("Admin password", type="password", key="admin_password_input")
             submitted = st.form_submit_button("Unlock")
         if submitted:
             if _check_password(password):
