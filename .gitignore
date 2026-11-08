@@ -25,3 +25,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 data/qdrant/
+
+# Local investigation history (per machine)
+frontend/.investigation_history.json
+frontend/.investigation_history.tmp

@@ -11,6 +11,7 @@ from typing import Any
 
 import streamlit as st
 
+from frontend.utils.access import backend_unavailable_message, demo_mode, is_admin, reserve_query
 from frontend.utils.history_manager import save_history_entry
 from frontend.api_client import (
     ApiClient,
@@ -72,12 +73,12 @@ def _page_header() -> None:
 def _render_empty_state(repo_error: str | None) -> None:
     with st.container(border=True):
         if repo_error:
-            st.markdown("#### The backend isn't reachable")
-            st.markdown(
-                "Start the API server with `.\\start_server.ps1` from the project folder, then refresh this page."
-            )
-            if st.button("Open system status", type="primary", icon=":material/monitor_heart:"):
+            st.markdown(backend_unavailable_message())
+            if not demo_mode() and st.button("Open system status", type="primary", icon=":material/monitor_heart:"):
                 go("status")
+        elif not is_admin():
+            st.markdown("#### No demo repositories yet")
+            st.markdown("The owner hasn't published a repository for this demo yet. Please check back soon.")
         else:
             st.markdown("#### Add a repository to get started")
             st.markdown(
@@ -120,6 +121,19 @@ def _render_target_banner(api_client: ApiClient, repo: dict[str, Any]) -> None:
         (r for r in st.session_state.get("repositories", []) if is_ready(r) and r.get("id") != repo.get("id")),
         None,
     )
+    if not is_admin():
+        st.html(
+            f"""
+            <div class="oi-callout oi-callout--warn">
+                <strong>{html.escape(name)} is still being prepared</strong> and can't answer questions yet.
+            </div>
+            """
+        )
+        if ready_other and st.button(f"Use {ready_other.get('name')} instead", type="primary", key="inv_use_ready_demo"):
+            select_repository(ready_other)
+            st.rerun()
+        return
+
     st.html(
         f"""
         <div class="oi-callout oi-callout--warn">
@@ -153,6 +167,11 @@ def _run_investigation(api_client: ApiClient, query: str) -> None:
 
     target_repo_id = verified_repo["id"]
     target_repo_name = verified_repo.get("name") or f"Repository #{target_repo_id}"
+
+    rejection = reserve_query(query)
+    if rejection:
+        st.warning(rejection, icon=":material/hourglass_top:")
+        return
 
     try:
         with st.spinner("Investigating: analysing the question, retrieving evidence and verifying citations…"):

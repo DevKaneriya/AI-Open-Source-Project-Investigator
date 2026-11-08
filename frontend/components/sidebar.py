@@ -11,6 +11,7 @@ import streamlit as st
 
 from frontend.api_client import ApiClient
 from frontend.utils.formatting import format_timestamp
+from frontend.utils.access import demo_mode, is_admin, render_admin_controls
 from frontend.utils.history_manager import load_history, clear_history
 from frontend.utils.navigation import go, select_repository
 from frontend.utils.pipeline import is_ready, pick_default_repo, stage_chip_html, stage_unknown
@@ -44,10 +45,10 @@ def _repository_selector(repos: list[dict[str, Any]], repo_error: str | None) ->
     repos_by_id = {r["id"]: r for r in repos if isinstance(r, dict) and "id" in r}
     if not repos_by_id:
         if repo_error:
-            st.caption("⚠️ Can't reach the backend. Check **System status**.")
+            st.caption("The demo is starting up. Refresh in a moment." if demo_mode() else "⚠️ Can't reach the backend. Check **System status**.")
         else:
             st.caption("No repositories yet.")
-        if st.button("Add a repository", icon=":material/add:", use_container_width=True, key="side_add_repo"):
+        if is_admin() and st.button("Add a repository", icon=":material/add:", use_container_width=True, key="side_add_repo"):
             go("repositories")
         return
 
@@ -136,5 +137,9 @@ def render_sidebar(api_client: ApiClient, pages: dict[str, Any]) -> None:
         st.divider()
         _recent_queries()
 
-        clean_url = api_client.base_url.replace("http://", "").replace("https://", "")
-        st.html(f'<div class="oi-side-foot">Backend · {html.escape(clean_url)}</div>')
+        if demo_mode():
+            st.divider()
+            render_admin_controls()
+        else:
+            clean_url = api_client.base_url.replace("http://", "").replace("https://", "")
+            st.html(f'<div class="oi-side-foot">Backend · {html.escape(clean_url)}</div>')

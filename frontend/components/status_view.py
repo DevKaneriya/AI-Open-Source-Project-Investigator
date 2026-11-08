@@ -17,11 +17,12 @@ from frontend.api_client import (
     BackendTimeoutError,
     ApiClientError,
 )
+from frontend.utils.access import backend_unavailable_message, demo_mode
 from frontend.utils.formatting import format_timestamp, format_execution_time
 
 SUBSYSTEMS = [
     ("PostgreSQL", "Stores repositories, files, symbols, imports and chunks.", "Checked through repository requests"),
-    ("Qdrant", "Local vector database holding chunk embeddings for semantic search.", "Checked through indexing and search"),
+    ("Vector store", "Chunk embeddings for semantic search: Qdrant locally, pgvector in PostgreSQL when hosted.", "Checked through indexing and search"),
     ("Groq LLM", "Analyses questions, evaluates evidence, writes and verifies answers.", "Checked through investigations"),
     ("BGE embeddings", "BAAI/bge-small-en-v1.5 model producing 384-dimensional vectors.", "Checked through indexing and search"),
 ]
@@ -66,6 +67,8 @@ def render_status_view(api_client: ApiClient) -> None:
         )
         with st.expander("Raw health response", icon=":material/data_object:"):
             st.json(health)
+    elif demo_mode():
+        st.warning(backend_unavailable_message(), icon=":material/hourglass_top:")
     else:
         st.error(f"**Backend is unreachable.** {error or 'Unknown failure.'}", icon=":material/cloud_off:")
         with st.container(border=True):

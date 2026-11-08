@@ -17,9 +17,11 @@ class GitHubService:
         workspace = Path(mkdtemp(prefix="repo_"))
         repository_path = workspace / "repository"
 
+        # Only the latest files are analysed, so skip the history.
         Repo.clone_from(
             repository_url,
             repository_path,
+            depth=1,
         )
 
         return str(repository_path)

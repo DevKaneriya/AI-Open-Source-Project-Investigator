@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+.env
+.env.*
+data
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+*.log
+frontend/.investigation_history.json
+frontend/.investigation_history.tmp
+backend/tests

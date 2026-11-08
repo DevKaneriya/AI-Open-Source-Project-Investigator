@@ -12,6 +12,7 @@ from typing import Any
 import streamlit as st
 
 from frontend.api_client import ApiClient, ApiClientError
+from frontend.utils.access import backend_unavailable_message, demo_mode, is_admin
 from frontend.utils.navigation import flash, go, select_repository, show_flash
 from frontend.utils.pipeline import (
     OUTDATED_BACKEND_MESSAGE,
@@ -109,6 +110,24 @@ def _count(value: Any) -> str:
     return f"{value:,}" if isinstance(value, int) else "–"
 
 
+def _render_delete(api_client: ApiClient, rid: int, name: str) -> None:
+    with st.popover("Delete", icon=":material/delete:"):
+        st.markdown(f"Delete **{html.escape(name)}**?")
+        st.caption("This removes its indexed files, symbols, chunks and vectors. The GitHub repository is not affected.")
+        if st.button("Delete permanently", key=f"repo_delete_{rid}", type="primary"):
+            try:
+                api_client.delete_repository(rid)
+            except ApiClientError as exc:
+                st.error(f"Couldn't delete: {exc.message}")
+            else:
+                if st.session_state.get("selected_repo_id") == rid:
+                    st.session_state["selected_repo_id"] = None
+                    st.session_state["selected_repo"] = None
+                _refresh(api_client)
+                flash("success", f"{name} was deleted.")
+                st.rerun()
+
+
 def _render_repo_card(api_client: ApiClient, repo: dict[str, Any], active: bool) -> None:
     rid = repo["id"]
     name = repo.get("name") or f"Repository #{rid}"
@@ -145,6 +164,7 @@ def _render_repo_card(api_client: ApiClient, repo: dict[str, Any], active: bool)
         )
 
         run_clicked = False
+        admin = is_admin()
         with st.container(horizontal=True, gap="small"):
             if st.button(
                 "Investigate",
@@ -157,11 +177,11 @@ def _render_repo_card(api_client: ApiClient, repo: dict[str, Any], active: bool)
                 select_repository(repo)
                 go("investigate")
 
-            if not ready:
+            if admin and not ready:
                 todo = remaining_steps(repo)
                 label = "Continue indexing" if len(todo) < len(PIPELINE_STEPS) - 1 else "Index now"
                 run_clicked = st.button(label, key=f"repo_run_{rid}", type="primary", icon=":material/play_arrow:")
-            else:
+            elif admin:
                 with st.popover("Re-index", icon=":material/refresh:"):
                     st.markdown("Re-run parsing, chunking and embedding. Useful after the repository changes upstream.")
                     st.caption("The repository can't be investigated until this finishes.")
@@ -169,21 +189,8 @@ def _render_repo_card(api_client: ApiClient, repo: dict[str, Any], active: bool)
                         st.session_state["reindex_repo_id"] = rid
                         st.rerun()
 
-            with st.popover("Delete", icon=":material/delete:"):
-                st.markdown(f"Delete **{html.escape(name)}**?")
-                st.caption("This removes its indexed files, symbols, chunks and vectors. The GitHub repository is not affected.")
-                if st.button("Delete permanently", key=f"repo_delete_{rid}", type="primary"):
-                    try:
-                        api_client.delete_repository(rid)
-                    except ApiClientError as exc:
-                        st.error(f"Couldn't delete: {exc.message}")
-                    else:
-                        if st.session_state.get("selected_repo_id") == rid:
-                            st.session_state["selected_repo_id"] = None
-                            st.session_state["selected_repo"] = None
-                        _refresh(api_client)
-                        flash("success", f"{name} was deleted.")
-                        st.rerun()
+            if admin:
+                _render_delete(api_client, rid, name)
 
         # Re-index requests come from a popover, so run them outside it
         if st.session_state.get("reindex_repo_id") == rid:
@@ -258,32 +265,40 @@ def _render_advanced(api_client: ApiClient, repos: list[dict[str, Any]]) -> None
 def render_repository_view(api_client: ApiClient) -> None:
     show_flash()
 
+    if is_admin():
+        title, intro = "Your codebases", "Add a repository and it's indexed automatically. Once it shows <b>Ready</b>, you can investigate it."
+    else:
+        title, intro = "Explore codebases", "These repositories are indexed and ready for questions."
     st.html(
-        """
+        f"""
         <div class="oi-page-header">
             <span class="oi-eyebrow">Repositories</span>
-            <h1>Your codebases</h1>
-            <p>Add a repository and it's indexed automatically. Once it shows <b>Ready</b>, you can investigate it.</p>
+            <h1>{title}</h1>
+            <p>{intro}</p>
         </div>
         """
     )
 
     repos, repo_err = sync_repositories(api_client)
     if repo_err:
-        st.error(
-            "**Can't reach the backend.** Start it with `.\\start_server.ps1`, then click **Refresh**.\n\n"
-            f"Details: {repo_err}",
-            icon=":material/cloud_off:",
-        )
-        if st.button("Open system status", icon=":material/monitor_heart:"):
+        st.error(f"{backend_unavailable_message()}\n\nDetails: {repo_err}", icon=":material/cloud_off:")
+        if not demo_mode() and st.button("Open system status", icon=":material/monitor_heart:"):
             go("status")
         return
 
-    if backend_outdated(repos):
+    admin = is_admin()
+    if backend_outdated(repos) and admin:
         st.warning(OUTDATED_BACKEND_MESSAGE, icon=":material/update:")
 
-    _render_add_form(api_client, repos)
-    repos = st.session_state.get("repositories", repos)
+    if admin:
+        _render_add_form(api_client, repos)
+        repos = st.session_state.get("repositories", repos)
+    else:
+        st.info(
+            "This is a public demo, so the repositories are picked by the owner. "
+            "Choose a **Ready** one and click **Investigate** to ask questions about it.",
+            icon=":material/visibility:",
+        )
 
     with st.container(horizontal=True, vertical_alignment="center", horizontal_alignment="distribute"):
         st.html(f'<div class="oi-section-label" style="margin:0">Added repositories · {len(repos)}</div>', width="content")
@@ -291,11 +306,12 @@ def render_repository_view(api_client: ApiClient) -> None:
             _refresh(api_client)
             st.rerun()
     if not repos:
-        st.caption("Nothing here yet. Add your first repository above.")
+        st.caption("Nothing here yet. Add your first repository above." if admin else "No repositories have been published yet.")
     else:
         active_id = st.session_state.get("selected_repo_id")
         for repo in repos:
             if isinstance(repo, dict) and "id" in repo:
                 _render_repo_card(api_client, repo, active=repo["id"] == active_id)
 
-    _render_advanced(api_client, repos)
+    if admin:
+        _render_advanced(api_client, repos)

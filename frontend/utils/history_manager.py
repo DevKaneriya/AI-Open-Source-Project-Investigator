@@ -15,6 +15,8 @@ from typing import Any
 
 import streamlit as st
 
+from frontend.utils.access import demo_mode
+
 logger = logging.getLogger(__name__)
 
 HISTORY_FILE = Path(__file__).resolve().parent.parent / ".investigation_history.json"
@@ -36,7 +38,8 @@ def load_history() -> list[dict[str, Any]]:
         return st.session_state["investigation_history"]
 
     history: list[dict[str, Any]] = []
-    if HISTORY_FILE.exists():
+    # In the public demo, history stays per visitor and is never shared via disk.
+    if HISTORY_FILE.exists() and not demo_mode():
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -73,6 +76,9 @@ def save_history_entry(entry: dict[str, Any]) -> list[dict[str, Any]]:
     new_history = [entry] + filtered[: MAX_HISTORY_ENTRIES - 1]
     st.session_state["investigation_history"] = new_history
 
+    if demo_mode():
+        return new_history
+
     # Persist to disk
     try:
         HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -91,7 +97,7 @@ def save_history_entry(entry: dict[str, Any]) -> list[dict[str, Any]]:
 def clear_history() -> None:
     """Clear all investigation history from session state and disk."""
     st.session_state["investigation_history"] = []
-    if HISTORY_FILE.exists():
+    if HISTORY_FILE.exists() and not demo_mode():
         try:
             os.remove(HISTORY_FILE)
         except Exception as exc:

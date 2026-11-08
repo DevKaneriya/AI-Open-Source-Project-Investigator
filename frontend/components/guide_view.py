@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import streamlit as st
 
 from frontend.api_client import ApiClient, ApiClientError
+from frontend.utils.access import is_admin
 from frontend.utils.history_manager import load_history
 from frontend.utils.navigation import go, select_repository, show_flash
 from frontend.utils.pipeline import OUTDATED_BACKEND_MESSAGE, backend_outdated, is_ready
@@ -135,7 +136,28 @@ def _render_how_it_works() -> None:
             )
 
 
-def _render_tips() -> None:
+def _render_demo_intro() -> None:
+    """What a visitor to the public demo sees in place of the setup checklist."""
+    ready = [r for r in st.session_state.get("repositories", []) if is_ready(r)]
+    with st.container(border=True):
+        st.html('<div class="oi-section-label">Try the live demo</div>')
+        steps = [
+            ("1", "Pick a repository", "Choose one in the sidebar under <b>Active repository</b>. "
+             + (f"{len(ready)} {'is' if len(ready) == 1 else 'are'} ready to explore." if ready else "")),
+            ("2", "Ask a question", "Type it in plain English, or start from one of the example chips."),
+            ("3", "Check the evidence", "Every claim cites source snippets you can open on GitHub."),
+        ]
+        for num, title, desc in steps:
+            st.html(
+                f'<div class="oi-check oi-check--current"><div class="oi-check__icon">{num}</div>'
+                f'<div class="oi-check__body"><div class="oi-check__title">{title}</div>'
+                f'<div class="oi-check__desc">{desc}</div></div></div>'
+            )
+        if st.button("Start investigating", type="primary", icon=":material/arrow_forward:", key="demo_start"):
+            go("investigate")
+
+
+def _render_tips(show_troubleshooting: bool = True) -> None:
     st.html('<div class="oi-section-label" style="margin-top:1.75rem">Getting better answers</div>')
     left, right = st.columns(2, gap="medium")
     with left:
@@ -162,6 +184,9 @@ def _render_tips() -> None:
                 "- Markers like **[E1]** link each claim to a source snippet below the answer."
             )
 
+    if not show_troubleshooting:
+        return
+
     with st.expander("Troubleshooting", icon=":material/build:"):
         st.markdown(
             "- **Backend unreachable**: start it with `.\\start_server.ps1` (or "
@@ -186,6 +211,12 @@ def render_guide_view(api_client: ApiClient) -> None:
         </div>
         """
     )
+
+    if not is_admin():
+        _render_demo_intro()
+        _render_how_it_works()
+        _render_tips(show_troubleshooting=False)
+        return
 
     if backend_outdated(st.session_state.get("repositories")):
         st.warning(OUTDATED_BACKEND_MESSAGE, icon=":material/update:")

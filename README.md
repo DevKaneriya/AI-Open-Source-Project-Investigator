@@ -160,6 +160,8 @@ streamlit run frontend/streamlit_app.py --server.port 8501
 
 Open `http://localhost:8501`. On first visit the **Getting started** page shows a live setup checklist. Add a repository on the **Repositories** page and it is cloned and indexed in one step. Once it shows **Ready**, ask questions on **Investigate**.
 
+To host a free public demo, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 ---
 
 ## Indexing a Repository
