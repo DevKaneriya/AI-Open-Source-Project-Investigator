@@ -29,3 +29,6 @@ data/qdrant/
 # Local investigation history (per machine)
 frontend/.investigation_history.json
 frontend/.investigation_history.tmp
+
+# Streamlit secrets (hosted values are set in the Streamlit Cloud dashboard)
+.streamlit/secrets.toml

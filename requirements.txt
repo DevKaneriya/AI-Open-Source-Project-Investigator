@@ -1,15 +1,40 @@
+# All dependencies for the project: backend API, Streamlit UI and tests.
+# Exact tested versions live in deploy/constraints.txt; install reproducibly with
+#   pip install -r requirements.txt -c deploy/constraints.txt
+
+# --- Backend API ---
 fastapi
 uvicorn[standard]
-python-dotenv
+pydantic
 pydantic-settings
-GitPython
+python-dotenv
+
+# --- Database & migrations ---
 SQLAlchemy
 alembic
 psycopg[binary]
+
+# --- Repository access & code parsing ---
+GitPython
 tree-sitter
 tree-sitter-language-pack
-qdrant-client
+
+# --- Embeddings & vector search ---
+# CPU-only torch on Linux x86_64 / Python 3.12 (Streamlit Community Cloud).
+# The default Linux wheel drags in several GB of CUDA libraries the app never uses.
+torch @ https://download.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=0955c7e3446326293f48af18fad67872fa31dee5a36a87690eb9e5be8b465be3 ; sys_platform == "linux" and platform_machine == "x86_64" and python_version == "3.12"
+torch ; sys_platform != "linux" or platform_machine != "x86_64" or python_version != "3.12"
 sentence-transformers
+qdrant-client
+
+# --- LLM & agent workflow ---
 groq
 langgraph
-langchain-core
+langchain-core
+
+# --- Frontend (Streamlit UI; also listed in frontend/requirements.txt) ---
+streamlit>=1.50.0
+requests>=2.31.0
+
+# --- Tests ---
+pytest
