@@ -317,7 +317,7 @@ Return ONLY valid JSON matching the specified schema."""
     _MODEL_CLASS_RE = re.compile(r"\(models\.Model\)|declarative_base|DeclarativeBase|@Entity|mongoose\.Schema|\(Base\)")
     _AUTH_BRANCH_RE = re.compile(r"is_authenticated|isAuthenticated|isLoggedIn|isLogged\w*|request\.user|auth_user|currentUser|IsAuthenticated")
     _BACKEND_ENTRY_NAMES = {"manage.py", "wsgi.py", "asgi.py", "main.py", "app.py", "server.py", "server.js", "server.ts"}
-    _FRONTEND_ENTRY_NAMES = {"main.ts", "main.tsx", "main.js", "index.tsx", "index.jsx"}
+    _FRONTEND_ENTRY_NAMES = {"main.ts", "main.tsx", "main.js", "main.jsx", "index.tsx", "index.jsx", "index.js", "index.ts"}
 
     def __init__(self, llm_service: LLMService):
         self.llm_service = llm_service
@@ -344,6 +344,60 @@ Return ONLY valid JSON matching the specified schema."""
         names = re.findall(r"(?<![\w.])(_*[a-z][a-z0-9]*(?:_[a-z0-9]+)+|_*[a-z]+(?:[A-Z][a-z0-9]*)+)(?:\(\))?(?![\w.])", question or "")
         return list(dict.fromkeys(n for n in names if not n.startswith(("http", "www"))))[:3]
 
+    # Broad, repository-wide inventory questions. They are answered from the
+    # repository inventory scan (every runtime file), not from top-k search,
+    # so "which X exist" can be listed completely and "there is no X" can be
+    # stated. A question naming a specific identifier or URL is not one.
+    _ENDPOINTS_Q_RE = re.compile(
+        r"\bend[- ]?points?\b|\b(?:api|url|http|rest|backend|server)\s+routes?\b|\bapi\s+(?:surface|calls?)\b"
+        r"|\b(?:which|what|list|all)\b[^?]*\b(?:apis|routes)\b|\broutes?\b[^?]*\b(?:exist|exposed|defined|registered|available)\b"
+        r"|\bwhat\s+apis?\b|\bapis?\b[^?]*\b(?:exposed|provided|offered)\b",
+        re.IGNORECASE,
+    )
+    _MODELS_Q_RE = re.compile(
+        r"\b(?:data|database|db|orm|domain)\s+(?:models?|schemas?|entit(?:y|ies)|tables?)\b|\bdata\s*model\w*\b"
+        r"|\b(?:which|what|list|all)\b[^?]*\b(?:models|entities|schemas|tables)\b"
+        r"|\bmodels?\b[^?]*\b(?:exist|defined|are there|available)\b|\bdatabase schema\b",
+        re.IGNORECASE,
+    )
+    _AUTH_Q_RE = re.compile(
+        r"\b(?:authenticat\w*|authoriz\w*|auth|log ?ins?|sign[- ]?(?:in|up)|jwt|access control|permissions?|"
+        r"user sessions?|session management|tokens?)\b",
+        re.IGNORECASE,
+    )
+    _AUTH_HOW_RE = re.compile(r"\b(?:where|how|which|what|is there|does)\b", re.IGNORECASE)
+    _DEPS_Q_RE = re.compile(
+        r"\bframeworks?\b|\bversions?\b|\blibrar(?:y|ies)\b|\bdependenc(?:y|ies)\b|\bpackages?\b|\btech(?:nology|nologies)?\s*stack\b"
+        r"|\bstack\b[^?]*\bused\b|\bbuilt (?:with|using)\b|\bwhat (?:language|technolog)\w*\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def inventory_topic(cls, question: str, question_type: str | None = None) -> str | None:
+        """'endpoints' | 'data_models' | 'authentication' | 'dependencies' for broad inventory questions."""
+        q = question or ""
+        specific = bool(cls._question_identifiers(q)) or bool(re.search(r"(?<![\w.])/[\w<{:]", q))
+        flowish = bool(cls._FLOW_WORDS_RE.search(q)) or bool(cls._ACTOR_WORDS_RE.search(q))
+        if cls._DEPS_Q_RE.search(q) and not flowish and (
+            question_type in (None, "dependency_analysis", "architectural_overview", "cross_cutting_concern", "symbol_lookup")
+            or re.search(r"\bversions?\b|\bframeworks?\b", q, re.IGNORECASE)
+        ):
+            return "dependencies"
+        if specific or flowish:
+            return None
+        if cls._ENDPOINTS_Q_RE.search(q):
+            return "endpoints"
+        if cls._MODELS_Q_RE.search(q) and not cls._WRITE_WORDS_RE.search(q):
+            return "data_models"
+        if (
+            cls._AUTH_Q_RE.search(q) and cls._AUTH_HOW_RE.search(q)
+            and question_type != "architectural_overview"
+            and not cls._GUEST_WORDS_RE.search(q)
+            and not re.search(r"\barchitecture\b|\boverview\b", q, re.IGNORECASE)
+        ):
+            return "authentication"
+        return None
+
     @classmethod
     def evaluation_profile(cls, question: str, question_type: str | None) -> str:
         q = question or ""
@@ -353,6 +407,9 @@ Return ONLY valid JSON matching the specified schema."""
             or (cls._USAGE_WORDS_RE.search(q) and cls._question_identifiers(q))
         ):
             return "call_site"
+        topic = cls.inventory_topic(q, question_type)
+        if topic:
+            return f"inventory_{topic}"
         if question_type == "symbol_lookup":
             return "symbol_lookup"
         if sig.is_cache_question(q) and question_type != "dependency_analysis":
@@ -827,12 +884,15 @@ Return ONLY valid JSON matching the specified schema."""
             )
         return a
 
-    def _assess_architecture(self, question: str, evidence: list[dict]) -> _Assessment:
+    def _assess_architecture(self, question: str, evidence: list[dict], coverage: dict | None = None) -> _Assessment:
         a = _Assessment()
         direct = _filter_direct(evidence)
+        inv = (coverage or {}).get("inventory") or {}
+        inv_config = {sig.normalize_path(p) for p in inv.get("config_files", [])}
+        inv_sites = inv.get("sites", {})
         has_frontend = any(sig.is_frontend_runtime(i.get("file")) for i in evidence) or bool(
             self._FRONTEND_WORDS_RE.search(question)
-        )
+        ) or bool(inv.get("frontend_files"))
 
         def basename(item):
             return sig.normalize_path(item.get("file")).lower().rsplit("/", 1)[-1]
@@ -842,8 +902,16 @@ Return ONLY valid JSON matching the specified schema."""
             if not sig.is_frontend_runtime(i.get("file"))
             and (basename(i) in self._BACKEND_ENTRY_NAMES or sig.has_entry_point_signal(sig.evidence_text(i)))
         ]
-        config = [i for i in direct if sig.file_role(i.get("file")) == sig.ROLE_CONFIG]
+        backend_entry += [
+            i for i in self._covering(direct, inv_sites.get("backend_entry", [])) if i not in backend_entry
+        ]
+        config = [
+            i for i in direct
+            if sig.file_role(i.get("file")) == sig.ROLE_CONFIG or sig.normalize_path(i.get("file")) in inv_config
+        ]
         routing = [i for i in direct if not sig.is_frontend_runtime(i.get("file")) and sig.extract_routes(sig.evidence_text(i))]
+        app_routes = [s for s in inv_sites.get("endpoints", []) if s.get("kind") not in ("dev-server",)]
+        routing += [i for i in self._covering(direct, app_routes) if i not in routing]
         persistence_cfg = [
             i for i in direct
             if sig.has_db_config(sig.evidence_text(i)) or self._MODEL_CLASS_RE.search(sig.evidence_text(i))
@@ -876,7 +944,17 @@ Return ONLY valid JSON matching the specified schema."""
                 and basename(i) in self._FRONTEND_ENTRY_NAMES
                 and sig.has_entry_point_signal(sig.evidence_text(i))
             ]
+            # Any file the repository scan found bootstrapping the UI
+            # (createRoot/bootstrapApplication/createApp) is the entry point.
+            frontend_entry += [
+                i for i in self._covering(direct, inv_sites.get("frontend_entry", []))
+                if i not in frontend_entry
+            ]
             api_comm = [i for i in direct if sig.is_frontend_runtime(i.get("file")) and sig.extract_http_calls(sig.evidence_text(i))]
+            api_comm += [
+                i for i in self._covering(direct, [s for s in inv_sites.get("http_calls", []) if s.get("kind") != "outbound"])
+                if i not in api_comm
+            ]
             a.add_stage("frontend_entry_point", frontend_entry,
                         f"Frontend bootstrap: {_describe_many(frontend_entry)}",
                         "No frontend bootstrap file (e.g. bootstrapApplication/createRoot) retrieved; components are not entry points.")
@@ -895,7 +973,359 @@ Return ONLY valid JSON matching the specified schema."""
                         "No authentication configuration or implementation retrieved.")
             if not auth:
                 a.want("text_queries", "DEFAULT_AUTHENTICATION_CLASSES", "permission_classes")
+        if inv:
+            a.notes.append(self._inventory_overview_note(inv))
+            # Optional stages (only when the repository has them): they make the
+            # answer prompt include how the UI is composed and where state lives.
+            components = [i for i in direct if "root_component" in (i.get("types") or [])]
+            if components:
+                a.add_stage("ui_composition", components,
+                            "Root components rendered from the entry point: " + _describe_many(components, 3), "")
+            stores = inv_sites.get("state_stores", [])
+            real_stores = [s for s in stores if s.get("kind") == "store"]
+            store_items = self._covering(direct, real_stores)
+            if store_items:
+                a.add_stage("state_management", store_items,
+                            "Client-side state store: " + _describe_many(store_items, 2), "")
+            if stores:
+                a.notes.append("Client-side state management: " + self._site_list(real_stores or stores, evidence, 4))
+            pkgs = [p for p in inv.get("packages", []) if not p.get("dev")]
+            if pkgs:
+                a.notes.append("Main frameworks/libraries (from manifests): " + "; ".join(
+                    f"{p['label']} {p['locked'] or p['declared']} ({p['manifest']})" for p in pkgs[:14]))
+            frontend_routes = inv_sites.get("frontend_routes", [])
+            if frontend_routes:
+                a.notes.append("Client-side routes: " + self._site_list(frontend_routes, evidence, 8))
         return a
+
+    # =========================================================================
+    # REPOSITORY INVENTORY (repository-wide scan recorded in search coverage)
+    # =========================================================================
+
+    @classmethod
+    def _covering(cls, evidence: list[dict], sites: list[dict]) -> list[dict]:
+        """Evidence items that contain at least one of *sites* (file + line)."""
+        items = []
+        for item in evidence:
+            if any(cls._covers(item, s["file"], s["line"]) for s in sites) and item not in items:
+                items.append(item)
+        return items
+
+    @staticmethod
+    def _eid_for(evidence: list[dict], file: str) -> str:
+        for item in evidence:
+            if sig.normalize_path(item.get("file")) == sig.normalize_path(file) and item.get("evidence_id"):
+                return f" [{item['evidence_id']}]"
+        return ""
+
+    @staticmethod
+    def _site_list(sites: list[dict], evidence: list[dict], limit: int = 12, label: bool = True) -> str:
+        out = []
+        for s in sites[:limit]:
+            eid = EvidenceEvaluationService._eid_for(
+                [i for i in evidence if EvidenceEvaluationService._covers(i, s["file"], s["line"])], s["file"],
+            )
+            out.append(f"{s['label'] if label else ''}{' — ' if label else ''}{s['file']}:{s['line']}{eid}".strip(" —"))
+        more = f" (+{len(sites) - limit} more)" if len(sites) > limit else ""
+        return "; ".join(out) + more
+
+    @staticmethod
+    def _absent(stage: str, details: str) -> FlowStageStatus:
+        return FlowStageStatus(stage=stage, present=False, connected_to_next=True, details=details, verified_absent=True)
+
+    def _inventory_overview_note(self, inv: dict) -> str:
+        counts = inv.get("counts", {})
+        side = (
+            "frontend-only (no backend/server code)" if not inv.get("has_backend") and inv.get("frontend_files")
+            else "backend-only (no browser frontend code)" if inv.get("has_backend") and not inv.get("frontend_files")
+            else "full-stack" if inv.get("has_backend") else "library/tooling"
+        )
+        return (
+            f"Repository-wide scan ({'complete' if inv.get('complete') else 'PARTIAL'}): {inv.get('files_scanned')} source "
+            f"files, {inv.get('frontend_files')} frontend runtime and {inv.get('backend_files')} backend runtime files. "
+            f"The repository is {side}. Found: {counts.get('endpoints', 0)} HTTP endpoint registrations, "
+            f"{counts.get('http_calls', 0)} client network calls, {counts.get('data_models', 0)} data model/schema "
+            f"definitions, {counts.get('db_config', 0)} database configuration sites, {counts.get('auth', 0)} "
+            f"authentication implementation sites."
+        )
+
+    def _assess_inventory(self, topic: str, question: str, evidence: list[dict], coverage: dict | None) -> _Assessment:
+        a = _Assessment()
+        inv = (coverage or {}).get("inventory")
+        if not inv:
+            # No scan recorded (e.g. no local checkout): fall back to evidence-only checks.
+            return self._assess_code_explanation(question, evidence) if topic != "dependencies" else self._assess_dependencies_evidence(evidence)
+        complete = bool(inv.get("complete"))
+        sites = inv.get("sites", {})
+        counts = inv.get("counts", {})
+        a.notes.append(self._inventory_overview_note(inv))
+
+        def stage_from(stage: str, category_sites: list[dict], found_details: str, absent_details: str,
+                       missing_details: str, want: tuple[str, ...] = ()) -> None:
+            if category_sites:
+                items = self._covering(evidence, category_sites)
+                a.add_stage(stage, items, found_details, missing_details)
+                if not items:
+                    a.want("text_queries", *want)
+            elif complete:
+                a.stages.append(self._absent(stage, absent_details))
+            else:
+                a.add_stage(stage, [], "", missing_details)
+                a.want("text_queries", *want)
+
+        if topic == "dependencies":
+            manifest_items = [
+                i for i in evidence
+                if sig.normalize_path(i.get("file")) in {sig.normalize_path(m) for m in inv.get("manifests", [])}
+            ]
+            if inv.get("manifests"):
+                a.add_stage(
+                    "dependency_manifests", manifest_items,
+                    f"Dependency manifests: {_describe_many(manifest_items, 4)}",
+                    f"Manifests {', '.join(inv['manifests'][:3])} exist but were not retrieved.",
+                )
+            elif complete:
+                a.stages.append(self._absent(
+                    "dependency_manifests",
+                    "No dependency manifest (package.json, requirements.txt, pyproject.toml, go.mod, ...) exists in the "
+                    "repository; framework versions cannot be read from a manifest.",
+                ))
+            a.notes.extend(self._dependency_notes(inv, evidence))
+            return a
+
+        if topic == "endpoints":
+            all_endpoints = sites.get("endpoints", [])
+            app = [s for s in all_endpoints if s.get("kind") not in ("dev-server", "include")]
+            dev = [s for s in all_endpoints if s.get("kind") == "dev-server"]
+            stage_from(
+                "application_endpoints", app,
+                f"Application HTTP endpoints ({counts.get('endpoints', len(app)) - len(dev)} registrations): "
+                + self._site_list(app, evidence),
+                "No application API endpoint is registered anywhere in the repository"
+                + (" (the only HTTP routes are development-server health checks, listed separately)." if dev else "."),
+                "Endpoint registrations exist but were not retrieved.",
+                ("@app.", "router.", "urlpatterns"),
+            )
+            if dev:
+                dev_items = self._covering(evidence, dev)
+                a.add_stage(
+                    "dev_server_endpoints", dev_items,
+                    "Development-server tooling endpoints (webpack dev server plugin, not an application API): "
+                    + self._site_list(dev, evidence),
+                    "Dev-server endpoints exist but were not retrieved.",
+                )
+            calls = sites.get("http_calls", [])
+            stage_from(
+                "client_http_calls", calls,
+                "Client network calls: " + self._site_list(calls, evidence, 8),
+                "No frontend or client code makes HTTP/network calls (no fetch/axios/HttpClient/WebSocket usage), "
+                "so the application does not consume any API.",
+                "Client network calls exist but were not retrieved.",
+            )
+            if complete and app:
+                a.notes.append(
+                    f"The repository-wide scan is complete: these {len(app)} endpoint registrations are the full list: "
+                    + self._site_list(app, evidence, 40)
+                )
+            return a
+
+        if topic == "data_models":
+            models = sites.get("data_models", [])
+            persistent = [s for s in models if s.get("kind") not in ("Pydantic schema", "Python dataclass")]
+            schemas = [s for s in models if s.get("kind") in ("Pydantic schema", "Python dataclass")]
+            stage_from(
+                "persistent_data_models", persistent,
+                "Persistent data models: " + "; ".join(
+                    f"{s['label']} ({s.get('kind')}) {s['file']}:{s['line']}{self._eid_for(self._covering(evidence, [s]), s['file'])}"
+                    for s in persistent[:15]
+                ),
+                "No persistent data model exists: no ORM model, entity, Prisma/Mongoose schema or SQL table is defined "
+                "anywhere in the repository, and there is no database configuration.",
+                "Model definitions exist but were not retrieved.",
+                ("models.Model", "Base)", "Schema("),
+            )
+            if complete and models:
+                a.notes.append(
+                    f"Complete list from the repository scan: {len(persistent)} persistent model(s): "
+                    + (", ".join(f"{s['label']} ({s['file']})" for s in persistent[:25]) or "none")
+                    + f"; {len(schemas)} validation/transfer schema(s), not database tables: "
+                    + (", ".join(s["label"] for s in schemas[:30]) or "none")
+                    + ". List every persistent model; do not claim other classes are or are not models."
+                )
+            if schemas:
+                items = self._covering(evidence, schemas)
+                a.add_stage(
+                    "schemas_and_dtos", items,
+                    "Validation/transfer schemas (not database tables): " + "; ".join(
+                        f"{s['label']} ({s.get('kind')}) {s['file']}:{s['line']}" for s in schemas[:10]),
+                    "Schema classes exist but were not retrieved.",
+                )
+            types = sites.get("type_definitions", [])
+            if types:
+                a.notes.append("TypeScript/Zod type definitions (client-side shapes, not persisted): "
+                               + self._site_list(types, evidence, 10))
+            stores = sites.get("state_stores", [])
+            if stores:
+                store_items = self._covering(evidence, stores[:3])
+                a.add_stage(
+                    "client_state", store_items,
+                    "Client-side state containers (in-memory application state, not persisted data models): "
+                    + self._site_list(stores, evidence, 6),
+                    "Client state stores exist but were not retrieved.",
+                )
+            return a
+
+        if topic == "authentication":
+            auth = sites.get("auth", [])
+            stage_from(
+                "authentication_implementation", auth,
+                "Authentication code: " + self._site_list(auth, evidence, 10),
+                "No authentication is implemented anywhere in the repository: no login/session/token handling, auth "
+                "provider SDK, password check, auth middleware or protected route exists.",
+                "Authentication code exists but was not retrieved.",
+                ("login", "authenticate", "token"),
+            )
+            mentions = [s for s in sites.get("auth_mentions", []) if not any(s["file"] == x["file"] for x in auth)]
+            if mentions:
+                items = self._covering(evidence, mentions[:4])
+                a.notes.append(
+                    "Auth-related names that are NOT an implementation (constants, labels, placeholders): "
+                    + self._site_list(mentions, evidence, 6)
+                    + (". Describe them as such." if items else ".")
+                )
+                if items and not auth:
+                    a.add_stage("auth_related_references", items, "Auth-related references: " + _describe_many(items, 3), "")
+            return a
+        return a
+
+    _BACKEND_PACKAGES = {"express", "@nestjs/core", "fastify", "koa", "django", "djangorestframework", "fastapi",
+                         "flask", "starlette"}
+
+    def _dependency_notes(self, inv: dict, evidence: list[dict]) -> list[str]:
+        """Compact, citable facts: declared (manifest) vs locked (lockfile) versions of key packages."""
+        notes = []
+        by_manifest: dict[str, list[dict]] = {}
+        for pkg in inv.get("packages", []):
+            by_manifest.setdefault(pkg["manifest"], []).append(pkg)
+        summaries = {m["file"]: m for m in inv.get("manifest_summaries", [])}
+        for manifest, pkgs in by_manifest.items():
+            eid = self._eid_for(evidence, manifest)
+            summary = summaries.get(manifest, {})
+            lock = summary.get("lockfile")
+            parts = []
+            for p in sorted(pkgs, key=lambda p: (p["dev"], p["name"])):
+                version = p["declared"]
+                if p["locked"] and p["locked"] != version.lstrip("^~="):
+                    version += f" (locked {p['locked']})"
+                parts.append(f"{p['label']} `{p['name']}` {version}{' [dev]' if p['dev'] else ''}")
+            lock_items = [i for i in evidence if lock and sig.normalize_path(i.get("file")) == sig.normalize_path(lock)]
+            lock_desc = ", ".join(f"{i.get('symbol')} [{i.get('evidence_id')}]" for i in lock_items if i.get("evidence_id"))
+            notes.append(
+                f"Key packages declared in {manifest}{eid} ({summary.get('dependencies', '?')} dependencies, "
+                f"{summary.get('dev_dependencies', 0)} dev"
+                + (f"; exact installed versions from {lock}" if lock else "; no lockfile, so only declared ranges are known")
+                + "): " + "; ".join(parts)
+                + ". Versions with ^/~ are declared ranges; 'locked' is the installed version."
+                + (f" Every locked version above comes from {lock} (lockfile evidence: {lock_desc}); state them all, "
+                   "citing the manifest window that declares the package." if lock_desc
+                   else (" State locked versions as installed versions, citing the manifest." if lock else ""))
+            )
+            scripts = summary.get("scripts")
+            if scripts:
+                notes.append(f"Scripts in {manifest}{eid}: " + "; ".join(f"{k}: `{v}`" for k, v in scripts.items()))
+        counts = inv.get("counts", {})
+        declared = {p["name"] for p in inv.get("packages", [])}
+        unused = inv.get("unused_packages", [])
+        if unused:
+            notes.append(
+                "Declared in the manifest but never imported by any source file (installed, not used in code): "
+                + ", ".join(f"`{u['name']}`" for u in unused[:20])
+                + (f" (+{len(unused) - 20} more)" if len(unused) > 20 else "") + "."
+            )
+        elif "axios" in declared and not counts.get("http_calls"):
+            notes.append("`axios` is declared as a dependency, but no source file calls it (no HTTP calls exist).")
+        backend = sorted(declared & self._BACKEND_PACKAGES)
+        if backend and not inv.get("has_backend"):
+            notes.append(f"{', '.join(backend)} declared but no backend code uses it.")
+        if not inv.get("packages") and inv.get("manifests"):
+            notes.append("Manifests exist but declare no well-known framework; list the dependencies shown in the manifest evidence.")
+        return notes
+
+    def _assess_dependencies_evidence(self, evidence: list[dict]) -> _Assessment:
+        a = _Assessment()
+        names = ("package.json", "requirements.txt", "pyproject.toml", "go.mod", "cargo.toml", "pom.xml", "gemfile",
+                 "build.gradle", "composer.json", "pipfile")
+        manifests = [i for i in evidence if sig.normalize_path(i.get("file")).lower().rsplit("/", 1)[-1] in names]
+        a.add_stage("dependency_manifests", manifests, f"Dependency manifests: {_describe_many(manifests, 4)}",
+                    "No dependency manifest was retrieved.")
+        if not manifests:
+            a.want("text_queries", '"dependencies"', "==")
+        return a
+
+    # Stage -> (predicate over the inventory record, absence explanation).
+    _INVENTORY_ABSENCE = {
+        "backend_entry_point": (lambda inv: not inv["has_backend"],
+                                "The repository has no backend: no server entry point, backend runtime files or application API exist."),
+        "backend_routing": (lambda inv: not inv["has_backend"] or not inv["app_endpoints"],
+                            "No backend URL routes / application API endpoints are registered anywhere in the repository."),
+        "persistence_configuration": (lambda inv: not inv["has_persistence"],
+                                      "No database is used: no database configuration, ORM models or queries exist in the repository."),
+        "api_communication": (lambda inv: not inv["counts"].get("http_calls"),
+                              "The frontend makes no HTTP/network calls anywhere (no fetch/axios/HttpClient/WebSocket usage)."),
+        "client_service": (lambda inv: not inv["counts"].get("http_calls"),
+                           "No client code issues an HTTP request anywhere in the repository; nothing leaves the browser."),
+        "url_routing": (lambda inv: not inv["counts"].get("http_calls") or not inv["app_endpoints"],
+                        "There is no request to route: no client HTTP call and/or no application route exists in the repository."),
+        "backend_handler": (lambda inv: not inv["counts"].get("http_calls") or not inv["has_backend"],
+                            "There is no backend handler for a client request: the repository has no client HTTP calls and/or no backend."),
+        "persistence": (lambda inv: not inv["has_persistence"],
+                        "No database persistence exists anywhere in the repository (no DB configuration, models or queries)."),
+        "backend_response": (lambda inv: not inv["counts"].get("http_calls") or not inv["has_backend"],
+                             "No backend response is produced for a client request (no client HTTP calls and/or no backend)."),
+        "frontend_handling": (lambda inv: not inv["counts"].get("http_calls"),
+                              "No HTTP response is handled in the frontend because the frontend makes no HTTP calls."),
+        "authentication": (lambda inv: not inv["counts"].get("auth"),
+                           "No authentication is implemented anywhere in the repository."),
+        "authentication_check": (lambda inv: not inv["counts"].get("auth"),
+                                 "No authentication/permission check exists anywhere in the repository."),
+        "backend_persistence": (lambda inv: not inv["has_persistence"],
+                                "No backend database access exists anywhere in the repository."),
+        "frontend_entry_point": (lambda inv: not inv["counts"].get("frontend_entry") and not inv["frontend_files"],
+                                 "The repository has no browser frontend."),
+        "configuration": (lambda inv: not inv.get("config_files"), "No runtime configuration file exists in the repository."),
+    }
+
+    def _apply_inventory_absence(self, a: _Assessment, coverage: dict | None) -> None:
+        """Missing stages the complete repository scan proves absent become verified-absent."""
+        inv = (coverage or {}).get("inventory")
+        if not inv or not inv.get("complete"):
+            return
+        view = {
+            **inv,
+            "app_endpoints": [s for s in inv.get("sites", {}).get("endpoints", []) if s.get("kind") not in ("dev-server", "include")],
+        }
+        absent_now = []
+        for st in a.stages:
+            if st.present or st.verified_absent or st.stage not in self._INVENTORY_ABSENCE:
+                continue
+            predicate, why = self._INVENTORY_ABSENCE[st.stage]
+            try:
+                if predicate(view):
+                    st.verified_absent = True
+                    st.connected_to_next = True
+                    st.details = f"VERIFIED ABSENT (complete scan of {inv.get('files_scanned')} files): {why}"
+                    absent_now.append(st.stage)
+            except (KeyError, TypeError):
+                continue
+        if absent_now:
+            stages = set(absent_now)
+            # Connections into a stage that does not exist cannot be verified or required.
+            a.unverified = [u for u in a.unverified if not any(s in u for s in stages)]
+            for kind in a.queries:
+                a.queries[kind] = [] if not a.missing_stages else a.queries[kind]
+            a.notes.insert(0, self._inventory_overview_note(inv))
+            a.notes.insert(1, "Verified absent in the whole repository: " + "; ".join(
+                f"{st.stage}: {st.details.split(': ', 1)[-1]}" for st in a.stages if st.stage in stages))
 
     def _assess_flow(self, question: str, question_type: str | None, evidence: list[dict]) -> _Assessment:
         a = _Assessment()
@@ -1073,7 +1503,13 @@ Return ONLY valid JSON matching the specified schema."""
         chain_handlers = handler_items if matched else unrouted_handlers
         handler_refs = set()
         for item in chain_handlers:
-            handler_refs |= set(re.findall(r"\b[A-Z][A-Za-z0-9]+\b", code_of(item)))
+            code = code_of(item)
+            handler_refs |= set(re.findall(r"\b[A-Z][A-Za-z0-9]+\b", code))
+            # Service-layer indirection: ``repository_service.add_repository(...)``
+            # delegates to class RepositoryService.
+            for instance in re.findall(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\.[a-z_]\w*\s*\(", code):
+                if instance.endswith(("_service", "_repository", "_manager", "_store", "_dao", "_crud")):
+                    handler_refs.add("".join(part.capitalize() for part in instance.split("_")))
         if chain_handlers:
             # Persistence of *this* flow: ORM operations in its handler, or in
             # code the handler references, plus the referenced model classes.
@@ -1103,6 +1539,14 @@ Return ONLY valid JSON matching the specified schema."""
 
         # --- response handling ----------------------------------------------------
         response_items = [i for i in chain_handlers if sig.has_backend_response(code_of(i))]
+        if not response_items:
+            # FastAPI/Flask-style handlers: the decorated route function's return
+            # value is serialised as the response.
+            response_items = [
+                i for i in route_items
+                if sig._DECORATOR_ROUTE_RE.search(sig.evidence_text(i))
+                and re.search(r"^\s+return\s+(?!None\b)\S", sig.evidence_text(i), re.MULTILINE)
+            ]
         # The response is handled only where code actually reads it: a
         # callback that uses its argument, an assignment, or a caller that
         # subscribes to the returned observable/promise.
@@ -1413,6 +1857,10 @@ Return ONLY valid JSON matching the specified schema."""
             result.grounding_notes = notes
             return result
 
+        if profile.startswith("inventory_"):
+            a = self._assess_inventory(profile[len("inventory_"):], question, evidence, search_coverage)
+            return self._from_assessment(profile, a, notes, current_round, max_rounds)
+
         assessors = {
             "symbol_lookup": lambda: self._assess_symbol_lookup(question, evidence),
             "call_site": lambda: self._assess_call_site(question, evidence, search_coverage),
@@ -1420,11 +1868,13 @@ Return ONLY valid JSON matching the specified schema."""
             "calculation": lambda: self._assess_calculation(question, evidence, search_coverage),
             "code_explanation": lambda: self._assess_code_explanation(question, evidence),
             "database_query": lambda: self._assess_database_query(question, evidence),
-            "architecture": lambda: self._assess_architecture(question, evidence),
+            "architecture": lambda: self._assess_architecture(question, evidence, search_coverage),
             "cache": lambda: self._assess_cache(question, evidence),
             "flow": lambda: self._assess_flow(question, question_type, evidence),
         }
         a = assessors[profile]()
+        if profile in ("architecture", "flow", "database_query"):
+            self._apply_inventory_absence(a, search_coverage)
         return self._from_assessment(profile, a, notes, current_round, max_rounds)
 
     def _from_assessment(
@@ -1440,7 +1890,7 @@ Return ONLY valid JSON matching the specified schema."""
         supported = [s.details for s in present]
         missing_claims = [f"Missing {s.stage}: {s.details}" for s in a.stages if not s.present] + a.unverified
         # Profile-specific facts first: the answer prompt keeps only the first few.
-        notes = a.notes + notes
+        notes = list(dict.fromkeys(a.notes + notes))
 
         if not missing and not a.unverified:
             return EvidenceEvaluation(

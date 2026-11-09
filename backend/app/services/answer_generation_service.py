@@ -80,6 +80,13 @@ class AnswerGenerationService:
         
         # Determine token budget based on question type
         max_tokens = self._get_token_budget(question_type)
+        # Broad repository questions (lists of packages/endpoints/models,
+        # architecture overviews) need room for the reasoning model's hidden
+        # reasoning plus a long list; a classifier label such as symbol_lookup
+        # for "which data models exist" must not shrink the budget.
+        profile = (evaluation_context or {}).get("evaluation_profile") or ""
+        if profile.startswith("inventory_") or profile in ("architecture", "flow"):
+            max_tokens = max(max_tokens, 3000)
         
         # Generate answer using LLM
         try:
@@ -103,11 +110,14 @@ class AnswerGenerationService:
                 if "parse" not in message and "empty response" not in message:
                     raise
                 logger.warning(f"Retrying answer generation after malformed LLM output: {e}")
+                # Unparseable JSON is almost always a response cut off at the
+                # token limit, so the retry gets more room.
                 llm_response = self.llm_service.generate_structured(
                     system_prompt=system_prompt,
-                    user_prompt=user_prompt,
+                    user_prompt=user_prompt
+                    + "\n\nKeep the answer focused and complete; end every list and the JSON object properly.",
                     response_schema=response_schema,
-                    max_tokens=max_tokens,
+                    max_tokens=min(4500, int(max_tokens * 1.5)),
                 )
             
             # Validate and construct answer with full citations
@@ -310,19 +320,40 @@ HANDLING GAPS:
                     "- When required stages or connections are missing, confidence MUST NOT be 'high'. Set confidence "
                     "to 'partial' or 'insufficient' and document all gaps in the limitations array.\n"
                 )
+            stages = evaluation_context.get("flow_stages", [])
             facts = [
                 f"{stage['stage']}: {stage['details']}"
-                for stage in evaluation_context.get("flow_stages", [])
+                for stage in stages
                 if stage.get("present")
-            ][:7] + list(evaluation_context.get("grounding_notes", []))[:6]
-            if facts:
+            ][:7]
+            absent = [
+                f"{stage['stage']}: {stage['details']}"
+                for stage in stages
+                if stage.get("verified_absent") and not stage.get("present")
+            ]
+            facts += list(evaluation_context.get("grounding_notes", []))[:7]
+            if facts or absent:
                 prompt += "\n\nEVIDENCE FACTS (deterministically verified from the code):\n"
                 prompt += "\n".join(f"- {fact[:1200]}" for fact in facts)
+                if absent:
+                    prompt += "\n\nVERIFIED ABSENT (a complete scan of every source file in the repository found none):\n"
+                    prompt += "\n".join(f"- {fact[:600]}" for fact in absent[:8])
+                    prompt += (
+                        "\n- State these absences plainly as facts about the repository (e.g. \"The repository has no "
+                        "backend, so no request reaches a database\"). They are answers, not gaps: do not list them "
+                        "as limitations, do not call them \"missing from the retrieved evidence\", never describe them "
+                        "as unverified, inferred or \"based on omission\", and do not lower confidence because of "
+                        "them. Cite the evidence that shows what the code does instead (e.g. the entry point, the "
+                        "manifest, the state store)."
+                    )
                 prompt += (
                     "\n- Call a list complete/exhaustive, or say something does not exist in the repository, ONLY "
-                    "when a fact above says the repository-wide search was complete; otherwise say \"in the "
+                    "when a fact above says the repository-wide search/scan was complete; otherwise say \"in the "
                     "retrieved evidence\"."
                 )
+            profile_guidance = self._PROFILE_GUIDANCE.get(evaluation_context.get("evaluation_profile") or "")
+            if profile_guidance:
+                prompt += f"\n\nANSWER FOCUS:\n{profile_guidance}"
 
         if question_type:
             type_guidance = self._get_question_type_guidance(question_type)
@@ -331,6 +362,43 @@ HANDLING GAPS:
         
         return prompt
     
+    _PROFILE_GUIDANCE = {
+        "inventory_dependencies": (
+            "List the frameworks and key libraries with their versions, grouped by role (UI framework, rendering/3D, "
+            "styling, state/data, build tooling, backend, database, testing). For each give the declared version from the "
+            "manifest and, when a lockfile is known, the exact locked version. Cite the manifest [E#]. Mention declared "
+            "dependencies the code never uses when a fact says so. Name only packages and files shown in the evidence "
+            "(no hypothetical lockfiles, no products inferred from driver names). When there is no lockfile or a "
+            "package is unpinned, state that as a fact in the answer, not as a limitation."
+        ),
+        "inventory_endpoints": (
+            "List every endpoint as METHOD /path -> handler with its file and [E#], grouped by area. If no application "
+            "API exists, say so directly in the first sentence, then describe any development-tooling endpoints "
+            "separately and whether the frontend calls any API."
+        ),
+        "inventory_data_models": (
+            "List each persistent model with its fields/relations as shown in evidence and its kind (ORM model, entity, "
+            "schema). Keep validation/transfer schemas and client-side state separate from database models. If no "
+            "persistent model exists, say so directly, then describe where the application keeps its data instead "
+            "(e.g. a client-side state store) with citations."
+        ),
+        "inventory_authentication": (
+            "Say where authentication is implemented (frontend and backend), the mechanism (session, JWT, OAuth, "
+            "provider SDK) and how protected code checks it, with citations. If none is implemented, say so directly in "
+            "the first sentence, then describe any auth-related constants or placeholders for what they are."
+        ),
+        "architecture": (
+            "Describe the real shape of this repository (frontend-only, backend-only or full-stack, per the scan facts): "
+            "entry point, main components/modules and how they compose, state management, build tooling and "
+            "configuration, and data flow. Describe tiers that do not exist as absent, briefly, without dwelling on them."
+        ),
+        "flow": (
+            "Follow the request through the stages that exist. When a fact says a stage is verified absent (for example "
+            "the frontend makes no HTTP calls or there is no database), say so plainly and explain what the code does "
+            "instead (e.g. user interaction only updates client-side state)."
+        ),
+    }
+
     def _get_question_type_guidance(self, question_type: str) -> str:
         """Get specific guidance based on question type."""
         

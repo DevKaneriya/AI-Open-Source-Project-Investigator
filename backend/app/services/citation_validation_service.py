@@ -592,6 +592,66 @@ class CitationValidationService:
                 continue
         return False
 
+    # Absence topics a complete repository inventory scan can establish.
+    _INVENTORY_TOPICS = (
+        (re.compile(r"\b(?:backend|server[- ]side|server code|web server)\b", re.IGNORECASE),
+         lambda inv: not inv.get("has_backend")),
+        (re.compile(r"\b(?:api|apis|endpoints?|routes?|rest)\b", re.IGNORECASE),
+         lambda inv: not [s for s in inv.get("sites", {}).get("endpoints", []) if s.get("kind") not in ("dev-server", "include")]),
+        (re.compile(r"\b(?:database|db|persist\w*|orm|sql|tables?|data models?|models?)\b", re.IGNORECASE),
+         lambda inv: not inv.get("has_persistence")),
+        (re.compile(r"\b(?:auth\w*|log ?ins?|sign[- ]?in|sessions?|tokens?|jwt|password\w*|credentials?)\b", re.IGNORECASE),
+         lambda inv: not inv.get("counts", {}).get("auth")),
+        (re.compile(r"\b(?:http|fetch|axios|network|requests?|api calls?|xhr|websockets?)\b", re.IGNORECASE),
+         lambda inv: not inv.get("counts", {}).get("http_calls")),
+    )
+
+    @classmethod
+    def _inventory_backs_absence(cls, text: str, inventory: dict | None) -> bool:
+        """A repository-wide negative claim is backed when every topic it names is empty in a complete scan."""
+        if not inventory or not inventory.get("complete"):
+            return False
+        if cls._UNUSED_RE.search(text):
+            unused = {u["name"].lower() for u in inventory.get("unused_packages", [])}
+            known = unused | {p["name"].lower() for p in inventory.get("packages", [])}
+            named = {n for n in known if re.search(rf"(?<![\w@/-]){re.escape(n)}(?![\w/-])", text, re.IGNORECASE)}
+            if named:
+                return named <= unused
+        topics = [check for pattern, check in cls._INVENTORY_TOPICS if pattern.search(text)]
+        return bool(topics) and all(check(inventory) for check in topics)
+
+    _UNUSED_RE = re.compile(
+        r"\bnot (?:actually )?(?:imported|used|referenced)\b|\bunused\b|\bnever (?:imported|used)\b|\bno (?:source )?file imports\b",
+        re.IGNORECASE,
+    )
+
+    _INVENTORY_LIST_TOPICS = (
+        (re.compile(r"\b(?:endpoints?|routes?|apis?)\b", re.IGNORECASE), "endpoints"),
+        (re.compile(r"\b(?:models?|entit(?:y|ies)|tables?|schemas?)\b", re.IGNORECASE), "data_models"),
+        (re.compile(r"\b(?:auth\w*|log ?ins?)\b", re.IGNORECASE), "auth"),
+        (re.compile(r"\b(?:http|network|fetch|axios|api calls?)\b", re.IGNORECASE), "http_calls"),
+    )
+
+    def _inventory_backs_exhaustive(self, text: str, inventory: dict | None, registry: dict) -> bool:
+        """An exhaustive claim ("no other endpoints", "the only routes") is backed by a complete scan
+        whose every site of the named category is in the evidence (or which found none)."""
+        if not inventory or not inventory.get("complete"):
+            return False
+        if self._inventory_backs_absence(text, inventory):
+            return True
+        sites = inventory.get("sites", {})
+        counts = inventory.get("counts", {})
+        categories = [cat for pattern, cat in self._INVENTORY_LIST_TOPICS if pattern.search(text)]
+        if not categories:
+            return False
+        for cat in categories:
+            listed = sites.get(cat, [])
+            if counts.get(cat, 0) > len(listed):
+                return False
+            if not all(self._in_registry(registry, s["file"], s["line"]) for s in listed):
+                return False
+        return True
+
     def _check_repository_claim(self, text: str, identifiers: set[str], registry: dict, scope: dict | None) -> list[str]:
         """Reasons why a repository-wide negative or exhaustive claim lacks search coverage."""
         scope = scope or self.scope()
@@ -601,6 +661,8 @@ class CitationValidationService:
         names = {t.split(".")[-1].rstrip("()") for t in identifiers if len(t.split(".")[-1]) > 2}
 
         if _EXHAUSTIVE_RE.search(text):
+            if self._inventory_backs_exhaustive(text, coverage.get("inventory"), registry):
+                return reasons
             refs = coverage.get("references", {})
             relevant = [refs[n] for n in names if n in refs] or (list(refs.values()) if len(refs) == 1 else [])
             complete = [
@@ -658,6 +720,8 @@ class CitationValidationService:
         refs = coverage.get("references", {})
         if names and any(n in refs and refs[n].get("complete") for n in names):
             return reasons
+        if self._inventory_backs_absence(text, coverage.get("inventory")):
+            return reasons
         reasons.append(
             f"Repository-wide negative claim without search coverage (only the retrieved evidence was examined): "
             f"\"{short_text}\"."
@@ -709,6 +773,14 @@ class CitationValidationService:
                     f"Citation [{eid}] references an evidence ID that does not exist in supplied evidence."
                 )
             cited = [registry[eid] for eid in claim["ids"] if eid in registry]
+
+            # A negative claim ("makes no fetch/axios calls") names things that
+            # by definition are not in the evidence; when the complete
+            # repository scan backs the absence, those names are not fabricated.
+            if _NEGATION_RE.search(text) and self._inventory_backs_absence(
+                text, ((scope or {}).get("coverage") or {}).get("inventory"),
+            ):
+                identifiers = {t for t in identifiers if sig.identifier_grounded(t, all_haystack)}
 
             if cited:
                 self._check_cited_claim(claim, text, identifiers, cited, all_items, all_haystack)

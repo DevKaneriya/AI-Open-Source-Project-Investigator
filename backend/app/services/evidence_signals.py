@@ -94,6 +94,11 @@ def file_role(path: str | None) -> str:
         return ROLE_DOCUMENTATION
     if name in CONFIG_FILENAMES or "/environments/" in low:
         return ROLE_CONFIG
+    if name.endswith(".py"):
+        # Python UIs (Streamlit, Gradio, ...) living under frontend/ or client/.
+        dirs = set(low.split("/")[:-1])
+        if dirs & {"frontend", "client"} and not dirs & _SERVER_DIRS:
+            return ROLE_FRONTEND
     if name.endswith(BACKEND_EXTS):
         return ROLE_BACKEND
     if name.endswith(FRONTEND_EXTS):
@@ -131,6 +136,17 @@ _HTTP_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 _FETCH_RE = re.compile(r"\bfetch\s*\(\s*([`'\"])([^`'\"]*)\1", re.IGNORECASE)
+# Python clients: requests/httpx/session calls and wrapper helpers such as
+# ``self._request("GET", f"/repositories/{repository_id}/investigate")``.
+_PY_HTTP_CALL_RE = re.compile(
+    r"\b(?:requests|httpx|session|self\.\w*session\w*|self\.\w*client\w*)\s*\.\s*(get|post|put|patch|delete)\s*\(\s*f?(['\"])([^'\"]*)\2",
+    re.IGNORECASE,
+)
+_WRAPPER_CALL_RE = re.compile(
+    r"\b(?:self\.)?_?(?:request|send|call|call_api|api_request|make_request)\s*\(\s*['\"](GET|POST|PUT|PATCH|DELETE)['\"]\s*,\s*"
+    r"f?(['\"])(/[^'\"]*)\2",
+    re.IGNORECASE,
+)
 _FETCH_METHOD_RE = re.compile(r"method\s*:\s*['\"](\w+)['\"]", re.IGNORECASE)
 
 _DJANGO_ROUTE_RE = re.compile(
@@ -158,6 +174,8 @@ def normalize_client_path(raw: str) -> list[str]:
     ``${environment.apiUrl}/accounts/cart/add/`` -> ``["accounts", "cart", "add"]``
     """
     value = re.sub(r"\$\{[^}]*\}", "{}", raw or "")
+    # Python f-string placeholders (f"/repos/{repository_id}") are path parameters too.
+    value = re.sub(r"\{[A-Za-z_][\w.\[\]'\"]*(?:![rsa])?(?::[^}]*)?\}", "{}", value)
     value = re.sub(r"^[a-z]+://[^/]+", "", value, flags=re.IGNORECASE)
     value = value.split("?", 1)[0]
     segments = []
@@ -219,6 +237,18 @@ def extract_http_calls(content: str) -> list[dict]:
                 "enclosing": enclosing_method(content, match.start()),
                 "position": match.start(),
             })
+    for regex in (_PY_HTTP_CALL_RE, _WRAPPER_CALL_RE):
+        for match in regex.finditer(content):
+            segments = normalize_client_path(match.group(3))
+            if segments:
+                calls.append({
+                    "method": match.group(1).lower(),
+                    "path": match.group(3),
+                    "segments": segments,
+                    "context": _call_context(content, match.start(), match.end()),
+                    "enclosing": enclosing_method(content, match.start()),
+                    "position": match.start(),
+                })
     for match in _FETCH_RE.finditer(content):
         segments = normalize_client_path(match.group(2))
         if not segments:
@@ -563,6 +593,14 @@ def rank_http_calls(calls: list[dict], terms: set[str], question: str) -> list[d
     """
     wants_write = bool(_WRITE_INTENT_RE.search(question or ""))
     wants_read = bool(_READ_INTENT_RE.search(question or ""))
+    if not terms and calls:
+        # A generic question ("trace a request from the frontend to the
+        # database") names no feature: trace one representative request,
+        # preferring a write (it reaches persistence) with the simplest path.
+        def generic_rank(call: dict) -> tuple:
+            reads = call["method"] == "get"
+            return (reads if not wants_read else not reads, call["segments"].count("*"), len(call["segments"]))
+        return [min(calls, key=generic_rank)]
     scored = []
     for call in calls:
         haystack = ("/".join(call["segments"]) + " " + call.get("context", "")).lower()
@@ -704,9 +742,20 @@ def class_names(item: dict) -> set[str]:
     return names
 
 
+_CLIENT_OBJECT_CALL_RE = re.compile(r"(?<![\w.])([a-z_][a-z0-9_]*(?:client|api|service)[a-z0-9_]*)\.([a-z_]\w*)\s*\(")
+
+
 def member_calls(content: str) -> list[tuple[str, str]]:
-    """``this.cartService.addToCart(`` -> ``("cartService", "addToCart")``."""
-    return _MEMBER_CALL_RE.findall(content or "")
+    """``this.cartService.addToCart(`` -> ``("cartService", "addToCart")``; also
+    module-level client objects such as ``api_client.investigate(``."""
+    content = content or ""
+    calls = _MEMBER_CALL_RE.findall(content)
+    seen = set(calls)
+    for call in _CLIENT_OBJECT_CALL_RE.findall(content):
+        if call not in seen and not call[1].startswith("_"):
+            seen.add(call)
+            calls.append(call)
+    return calls
 
 
 def handled_http_methods(content: str) -> set[str]:
@@ -758,6 +807,8 @@ _FRONTEND_HANDLING_RE = re.compile(
 _UI_EVENT_RE = re.compile(
     r"\((?:click|submit|ngSubmit|change|input|keyup|keydown)\)\s*="
     r"|\bon(?:Click|Submit|Change)\s*=|addEventListener\s*\(|@click|v-on:"
+    r"|\bst\.(?:button|form_submit_button|chat_input|text_input|text_area|selectbox|pills|segmented_control)\s*\("
+    r"|\bon_(?:click|change|submit)\s*="
 )
 _AUTH_RE = re.compile(
     r"\bauthenticate\s*\(|permission_classes|IsAuthenticated|authentication_classes|JWT|jwt"
@@ -942,6 +993,9 @@ def identifier_grounded(token: str, haystack: str) -> bool:
     if not tok:
         return True
     if tok in haystack:
+        return True
+    # Singular in prose, plural in code (devDependency -> devDependencies).
+    if tok.endswith("y") and len(tok) > 4 and tok[:-1] + "ies" in haystack:
         return True
     # Call expression: ground the callee; argument names are often paraphrased.
     if "(" in tok:

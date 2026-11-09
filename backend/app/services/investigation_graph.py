@@ -54,6 +54,12 @@ from backend.app.services.repository_workspace import ensure_local_copy
 logger = logging.getLogger(__name__)
 
 
+def evidence_signals_domain_terms(question: str) -> set[str]:
+    from backend.app.services import evidence_signals
+
+    return evidence_signals.domain_terms(question)
+
+
 class InvestigationState(TypedDict, total=False):
     """Typed state passed through the LangGraph investigation workflow."""
 
@@ -367,6 +373,7 @@ class InvestigationGraphService:
             # named function, or every computation of an asked quantity. Each
             # records its coverage so completeness/absence claims can be checked.
             coverage = dict(state.get("search_coverage") or {})
+            inventory_context: list[dict] = []
             if current_round == 0 and repo_path:
                 try:
                     profile_context, coverage = self._profile_retrieval(db, repo_id, repo_path, state["query"], question_type, coverage)
@@ -374,6 +381,12 @@ class InvestigationGraphService:
                     source_context = profile_context + source_context
                 except Exception as exc:
                     logger.warning(f"Profile retrieval failed: {exc}")
+                # Repository-wide inventory: establishes what exists anywhere in
+                # the repository (and what does not) for broad questions.
+                try:
+                    inventory_context, coverage = self._inventory_retrieval(repo_path, state["query"], question_type, coverage)
+                except Exception as exc:
+                    logger.warning(f"Inventory retrieval failed: {exc}", exc_info=True)
 
             # 7b. Relationship traversal (bounded): client URL -> route ->
             # handler -> serializers/models, plus callers of requested symbols.
@@ -430,6 +443,7 @@ class InvestigationGraphService:
                 "source_context": source_context,
                 "relationships": relationships,
                 "architectural_files": arch_results,
+                "inventory": inventory_context,
             }
 
         finally:
@@ -473,6 +487,89 @@ class InvestigationGraphService:
             coverage = {**coverage, "computations": {**coverage.get("computations", {}), **record}}
         return contexts, coverage
 
+    def _inventory_retrieval(
+        self, repo_path: str, query: str, question_type: Optional[str], coverage: dict,
+    ) -> tuple[list[dict], dict]:
+        """Scan the repository (cached) and select evidence windows for the question's profile."""
+        from backend.app.services import repository_inventory_service as inventory
+
+        inv = inventory.RepositoryInventoryService().scan(repo_path)
+        coverage = {**coverage, "inventory": inv.to_coverage()}
+
+        evaluator = type(self.evidence_evaluation_service)
+        profile = evaluator.evaluation_profile(query, question_type) if hasattr(evaluator, "evaluation_profile") else ""
+        app = lambda s: s.kind not in ("dev-server", "include")  # noqa: E731
+        store = lambda s: s.kind == "store"  # noqa: E731
+        context = lambda s: s.kind != "store"  # noqa: E731
+
+        def stores(n: int) -> list[dict]:
+            # Real stores (zustand/redux/pinia) before React contexts.
+            found = inventory.site_windows(inv, "state_stores", n, before=1, after=30, max_span=60, keep=store)
+            return found + inventory.site_windows(inv, "state_stores", max(0, n - len(found)), before=1, after=20, keep=context)
+
+        windows: list[dict] = []
+        if profile == "inventory_dependencies":
+            windows = inventory.manifest_windows(inv, 6) + inventory.lockfile_windows(inv, 3)
+        elif profile == "inventory_endpoints":
+            app_windows = inventory.site_windows(inv, "endpoints", 7, before=2, after=5, max_span=30, keep=app)
+            windows = (
+                app_windows
+                + inventory.site_windows(inv, "endpoints", 2 if app_windows else 7, before=2, after=5, max_span=30,
+                                         keep=lambda s: s.kind == "dev-server")
+                + inventory.site_windows(inv, "http_calls", 3, before=4, after=6)
+            )
+        elif profile == "inventory_data_models":
+            persistent = lambda s: s.kind not in ("Pydantic schema", "Python dataclass")  # noqa: E731
+            model_windows = inventory.definition_windows(inv, "data_models", 8, keep=persistent)
+            windows = (
+                model_windows
+                + inventory.definition_windows(inv, "data_models", 1 if model_windows else 4, keep=lambda s: not persistent(s), cap=25)
+                + inventory.site_windows(inv, "db_config", 1, before=2, after=8)
+                + stores(1 if model_windows else 2)
+            )
+        elif profile == "inventory_authentication":
+            windows = (
+                inventory.site_windows(inv, "auth", 6, before=4, after=10)
+                + inventory.site_windows(inv, "auth_mentions", 1 if inv.has("auth") else 2, before=1, after=25, max_span=60)
+            )
+        elif profile == "flow" and not evidence_signals_domain_terms(query):
+            windows = inventory.generic_flow_windows(inv, query)
+        elif profile == "architecture":
+            windows = (
+                inventory.readme_window(inv)
+                + inventory.site_windows(inv, "frontend_entry", 1, before=6, after=6)
+                + inventory.component_windows(inv, 2)
+                + inventory.site_windows(inv, "backend_entry", 2, before=4, after=10)
+                + inventory.manifest_windows(inv, 2)
+                + inventory.config_windows(inv, 2)
+                + inventory.site_windows(inv, "endpoints", 2, before=3, after=6, keep=app)
+                + inventory.site_windows(inv, "data_models", 1, before=1, after=16)
+                + stores(1)
+                + inventory.site_windows(inv, "http_calls", 1, before=4, after=6, keep=lambda s: s.kind != "outbound")
+            )
+        return windows, coverage
+
+    @staticmethod
+    def _pinned_inventory_evidence(items: list[dict]) -> list[dict]:
+        """Inventory windows in response format (they bypass the collector's top-k cap)."""
+        return [
+            {
+                "file": item.get("file"),
+                "language": None,
+                "symbol": item.get("symbol"),
+                "symbol_type": "inventory",
+                "qualified_name": None,
+                "start_line": item.get("start_line"),
+                "end_line": item.get("end_line"),
+                "snippet": item.get("content", ""),
+                "relevance_score": item.get("evidence_score", 1.3),
+                "types": ["inventory", item.get("inventory_category") or ""],
+                "exact_match": False,
+            }
+            for item in items
+            if item.get("content")
+        ]
+
     def _collect_rank_evidence_node(self, state: InvestigationState) -> dict:
         """Node 4: Collect, merge, and rank evidence from current round into accumulated evidence."""
         t0 = time.time()
@@ -506,6 +603,12 @@ class InvestigationGraphService:
 
         new_evidence_raw = collector_res.get("evidence", [])
         new_evidence = self.retrieval_service._transform_evidence_for_response(new_evidence_raw)
+        # Inventory windows answer broad questions directly; the collector
+        # ranks by keyword overlap and would drop e.g. a package.json for
+        # "which frameworks are used", so they are registered first.
+        pinned = self._pinned_inventory_evidence(raw_results.get("inventory") or [])
+        if pinned:
+            new_evidence = pinned + new_evidence
 
         # Merge new evidence into the canonical evidence registry for this
         # investigation (deduplicating by normalised file + start_line).
@@ -611,12 +714,24 @@ class InvestigationGraphService:
             )
         except Exception as exc:
             logger.error(f"Answer generation failed: {exc}", exc_info=True)
+            rate_limited = "rate limit" in str(exc).lower() or "429" in str(exc)
+            daily = bool(re.search(r"daily|per day|\(TPD\)", str(exc), re.IGNORECASE))
             answer = InvestigationAnswer(
                 question=state["query"],
-                answer=f"Unable to generate answer due to an internal error: {str(exc)}",
+                answer=(
+                    "The answer could not be written because the language model's daily usage quota is used up. "
+                    "The evidence below was still retrieved; answers will work again once the quota resets "
+                    "(or with a higher-tier API key)."
+                    if daily else
+                    "The answer could not be written because the language model is rate limited right now. "
+                    "The evidence below was still retrieved; please ask again in about a minute."
+                    if rate_limited else
+                    "The answer could not be written because the language model request failed. "
+                    "The evidence below was still retrieved; please try again."
+                ),
                 citations=[],
                 confidence="insufficient",
-                limitations=[str(exc)],
+                limitations=[f"Answer generation failed: {str(exc)[:300]}"],
             )
 
         stage_times = dict(state.get("stage_times", {}))
@@ -715,6 +830,7 @@ class InvestigationGraphService:
         # actually evaluated and verified against cited evidence.
         validation = state.get("citation_validation") or {}
         status = validation.get("validation_status")
+        self._reconcile_with_inventory(answer, state)
         if status and status != "verified" and answer.confidence == "high":
             answer.confidence = "partial"
             note = f"Citation validation status: {status}. {validation.get('details', '')}".strip()
@@ -753,6 +869,79 @@ class InvestigationGraphService:
             "response": response,
             "total_execution_time_seconds": total_time,
         }
+
+    _HEDGE_RE = re.compile(
+        r"\bif (?:any |additional |other )?\w*\s*(?:exist|are defined|are present)\b[^.]*\belsewhere\b"
+        r"|\bnot captured\b|\bbased on (?:the )?(?:omission|absence|lack)\b|\blimited to the (?:provided|supplied|retrieved|visible)\b"
+        r"|\bmay (?:exist|be defined|be present) (?:elsewhere|in other)\b|\bother parts of the repository\b"
+        r"|\bnot (?:included|present|shown|visible) in the (?:provided|supplied|retrieved) (?:evidence|files|snippets|code|excerpts)\b"
+        r"|\b(?:absence|lack) of\b[^.]*\b(?:is )?(?:not verified|unverified|inferred)\b",
+        re.IGNORECASE,
+    )
+
+    def _reconcile_with_inventory(self, answer: InvestigationAnswer, state: InvestigationState) -> None:
+        """Drop limitations a complete repository scan contradicts; restore confidence they lowered.
+
+        The LLM tends to hedge ("other routes may exist elsewhere", "no backend
+        appears in the supplied files") even when the scan of every file
+        established the answer. Such limitations are removed; if they were the
+        only limitations of an answer whose evidence was sufficient and whose
+        citations verified, the answer's confidence is restored to high.
+        """
+        inventory = (state.get("search_coverage") or {}).get("inventory")
+        if not inventory or not inventory.get("complete") or not answer.limitations:
+            return
+        evaluation = state.get("evidence_evaluation") or {}
+        validation = state.get("citation_validation") or {}
+        registry = {
+            item.get("evidence_id"): item for item in state.get("accumulated_evidence", []) if item.get("evidence_id")
+        }
+        checker = self.citation_validation_service
+        backs_absence = getattr(checker, "_inventory_backs_absence", None)
+        backs_exhaustive = getattr(checker, "_inventory_backs_exhaustive", None)
+        if not backs_absence or not backs_exhaustive:
+            return
+
+        kept = []
+        for limitation in answer.limitations:
+            text = str(limitation)
+            if text.startswith(("Unverified claim corrected", "Citation validation status", "Answer generation failed")):
+                kept.append(limitation)
+                continue
+            hedge = bool(self._HEDGE_RE.search(text))
+            contradicted = backs_absence(text, inventory) or (
+                hedge and (backs_exhaustive(text, inventory, registry) or backs_absence(text, inventory))
+            ) or (
+                # Doubts about the scan itself: it covered every source file.
+                re.search(r"\b(?:repository[- ]wide )?scan\b", text, re.IGNORECASE)
+                and re.search(r"\bbased on\b|\bnot shown\b|\bnot (?:directly )?visible\b|\bcannot be (?:verified|confirmed)\b", text, re.IGNORECASE)
+            ) or (
+                # "No lockfile, so only declared ranges" / "many packages are
+                # unpinned" restate facts of the repository, not evidence gaps.
+                evaluation.get("evaluation_profile") == "inventory_dependencies"
+                and re.search(r"\bno lock ?file\b|\block ?file is (?:not present|absent|missing)\b|\bunpinned\b|"
+                              r"\bwithout (?:a )?version\b|\bversion (?:ranges? |specs? )?(?:are |is )?(?:missing|unspecified|not specified)\b",
+                              text, re.IGNORECASE)
+                and not re.search(r"\bnot (?:shown|visible|retrieved|included)\b", text, re.IGNORECASE)
+            ) or (
+                # "Other packages may have locked versions that are not shown":
+                # every key package's locked version was provided.
+                evaluation.get("evaluation_profile") == "inventory_dependencies"
+                and re.search(r"\block(?:ed|file)\b", text, re.IGNORECASE)
+                and re.search(r"\bmay\b|\bnot (?:shown|available|included|visible)\b", text, re.IGNORECASE)
+                and all(p.get("locked") for p in inventory.get("packages", []) if p.get("lockfile"))
+            )
+            if not contradicted:
+                kept.append(limitation)
+        removed = len(answer.limitations) - len(kept)
+        answer.limitations = kept
+        if (
+            removed and not kept
+            and answer.confidence == "partial"
+            and evaluation.get("sufficiency") == "sufficient"
+            and validation.get("validation_status") == "verified"
+        ):
+            answer.confidence = "high"
 
     @staticmethod
     def _interleave(*result_lists: list) -> list:
