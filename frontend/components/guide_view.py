@@ -15,6 +15,7 @@ from frontend.utils.access import is_admin
 from frontend.utils.history_manager import load_history
 from frontend.utils.navigation import go, select_repository, show_flash
 from frontend.utils.pipeline import OUTDATED_BACKEND_MESSAGE, backend_outdated, is_ready
+from frontend.utils.skeleton import block_skeleton, checklist_html
 
 
 @dataclass
@@ -221,7 +222,9 @@ def render_guide_view(api_client: ApiClient) -> None:
     if backend_outdated(st.session_state.get("repositories")):
         st.warning(OUTDATED_BACKEND_MESSAGE, icon=":material/update:")
 
-    _render_checklist(_checklist(api_client))
+    with block_skeleton(checklist_html()):
+        items = _checklist(api_client)
+    _render_checklist(items)
 
     # Offer a shortcut to a ready repo when one exists but isn't selected
     ready = [r for r in st.session_state.get("repositories", []) if is_ready(r)]

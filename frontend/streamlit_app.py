@@ -35,6 +35,7 @@ from frontend.utils.errors import render_error_dialog, report_error
 from frontend.utils.history_manager import load_history
 from frontend.utils.navigation import register_pages
 from frontend.utils.repo_manager import sync_repositories
+from frontend.utils.skeleton import page_skeleton
 
 STYLES_PATH = Path(__file__).resolve().parent / "assets" / "styles.css"
 
@@ -89,9 +90,6 @@ def main() -> None:
     inject_styles()
     init_session_state()
 
-    # Backend is the single source of truth for repositories
-    repos, repo_error = sync_repositories(api_client)
-
     pages = {
         "investigate": st.Page(investigate_page, title="Investigate", icon=":material/search:", url_path="investigate", default=True),
         "guide": st.Page(guide_page, title="Getting started", icon=":material/rocket_launch:", url_path="guide"),
@@ -100,6 +98,14 @@ def main() -> None:
     }
     register_pages(pages)
     current = st.navigation(list(pages.values()), position="hidden")
+
+    # Backend is the single source of truth for repositories. The first load
+    # waits on the API, so show a skeleton shaped like the page being opened.
+    if st.session_state.get("repositories_loaded"):
+        repos, repo_error = sync_repositories(api_client)
+    else:
+        with page_skeleton(current.url_path or "investigate"):
+            repos, repo_error = sync_repositories(api_client)
 
     # First visit with nothing set up yet: open the guide instead of an empty workspace
     if not st.session_state.get("onboarding_checked"):

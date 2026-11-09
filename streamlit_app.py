@@ -56,7 +56,7 @@ def _api_healthy() -> bool:
         return False
 
 
-@st.cache_resource(show_spinner="Starting the backend. The first start takes a minute or two...")
+@st.cache_resource(show_spinner=False)
 def _start_backend() -> subprocess.Popen:
     migrate = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
@@ -84,10 +84,15 @@ def _start_backend() -> subprocess.Popen:
 def ensure_backend() -> None:
     if _api_healthy():
         return
-    process = _start_backend()
-    if process.poll() is not None:  # the API crashed since it was started: start it again
-        _start_backend.clear()
-        _start_backend()
+    from frontend.utils.skeleton import page_skeleton
+
+    # The first start loads the embedding model, which takes a minute or two:
+    # show the real page's shape instead of a bare spinner.
+    with page_skeleton("investigate", "Starting the backend. The first start takes a minute or two…"):
+        process = _start_backend()
+        if process.poll() is not None:  # the API crashed since it was started: start it again
+            _start_backend.clear()
+            _start_backend()
 
 
 def _fail(title: str, error: BaseException | str, hint: str) -> None:

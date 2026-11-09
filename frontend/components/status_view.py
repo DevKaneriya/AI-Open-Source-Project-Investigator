@@ -19,6 +19,7 @@ from frontend.api_client import (
 )
 from frontend.utils.access import backend_unavailable_message, demo_mode
 from frontend.utils.formatting import format_timestamp, format_execution_time
+from frontend.utils.skeleton import block_skeleton, status_html
 
 SUBSYSTEMS = [
     ("PostgreSQL", "Stores repositories, files, symbols, imports and chunks.", "Checked through repository requests"),
@@ -51,7 +52,8 @@ def render_status_view(api_client: ApiClient) -> None:
         """
     )
 
-    health, error, latency = _probe(api_client)
+    with block_skeleton(status_html()):
+        health, error, latency = _probe(api_client)
     healthy = bool(health) and health.get("status") == "healthy"
 
     if healthy:
