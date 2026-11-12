@@ -17,7 +17,7 @@ The LLM is Groq's free API, as in local development.
 - **Nothing important lives on the app's disk.** The code index and the vectors live in Neon (`VECTOR_BACKEND=pgvector`), so restarts lose nothing. Cloned checkouts are downloaded again the first time a repository is used after a restart.
 - **Visitors can't break it.** Demo mode is on: visitors can only ask questions about the repositories you've indexed. Adding, re-indexing and deleting repositories requires the admin password (sidebar → *Owner access*).
 - **The Groq quota is protected.** Each visitor gets 8 questions per hour, and the whole demo gets 40 per hour. Change these with the `DEMO_SESSION_QUERIES` and `DEMO_QUERIES_PER_HOUR` secrets.
-- **Sleeping.** After 12 hours without visitors the app sleeps. The next visitor sees a "wake up" button, and the app is back within a couple of minutes.
+- **Sleeping.** After 12 hours without visitors the app sleeps, and the next visitor sees a "wake up" button. A GitHub Actions workflow ([`keep-awake.yml`](../.github/workflows/keep-awake.yml)) prevents this by opening the app in a headless browser every 4 hours, and wakes it if it fell asleep anyway. See [Keeping the app awake](#keeping-the-app-awake).
 
 ## One-time setup
 
@@ -59,6 +59,15 @@ Secrets are stored only in the Streamlit dashboard. Never commit them; `.streaml
 3. Click **Lock admin mode**. Visitors now see only the ready repositories.
 
 Put the app URL (`https://<your-name>.streamlit.app`) in your portfolio.
+
+## Keeping the app awake
+
+Community Cloud counts only real app sessions as activity, so a plain HTTP ping (UptimeRobot, cron + curl) does not stop the app from sleeping. The `Keep Streamlit app awake` workflow opens the app in a headless Chromium instead and clicks the wake-up button if needed.
+
+1. On GitHub, open the repository's **Settings → Secrets and variables → Actions → Variables** and add `STREAMLIT_APP_URL` = `https://<your-name>.streamlit.app`.
+2. Open **Actions → Keep Streamlit app awake → Run workflow** once to check it. The log ends with "App loaded." On failure, a screenshot is attached to the run.
+
+It then runs every 4 hours. GitHub pauses scheduled workflows in repositories with no commits for 60 days. If that happens, re-enable it on the Actions tab.
 
 ## Redeploying after changes
 
